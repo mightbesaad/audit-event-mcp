@@ -1,0 +1,16 @@
+{
+  "name": "audit-event-notary",
+  "main": "src/notary.ts",
+  "compatibility_date": "2026-02-24",
+  // account_id omitted — Wrangler infers from auth context.
+  // NOTARY_PRIVATE_KEY — Ed25519 private key (hex-encoded) — stored as Workers Secret only.
+  // Never appears in source, comments, or commits. Set via: wrangler secret put NOTARY_PRIVATE_KEY --config wrangler.notary.jsonc
+  // Flush trigger: 15-minute cron OR 1 000 pending events, whichever comes first.
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "observability": {
+    "enabled": true
+  },
+  "routes": [{ "pattern": "audit-event-notary.kajaril.com", "custom_domain": true }]
+}

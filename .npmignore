@@ -1,0 +1,17 @@
+.claude/
+.claudeignore
+.githooks/
+.github/
+src/__tests__/
+test/
+docker/
+migrations/
+skills/
+biome.json
+tsconfig.json
+vitest.config.ts
+wrangler.jsonc
+wrangler.notary.jsonc
+CLAUDE.md
+.wrangler/
+.playwright-mcp/

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kajaril/audit-event-mcp",
+  "title": "Audit Event",
+  "description": "Agent steward infrastructure — hash-chained audit log with Merkle notary and GDPR/AI-Act compliance skill.",
+  "version": "0.1.0",
+  "websiteUrl": "https://kajaril.com/audit-event/",
+  "repository": {
+    "url": "https://github.com/kajaril/audit-event-mcp",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://audit-event.kajaril.com/mcp"
+    }
+  ]
+}

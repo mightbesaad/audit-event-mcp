@@ -1,0 +1,35 @@
+{
+  "name": "audit-event-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-02-24",
+  // account_id omitted — Wrangler infers from auth context.
+  // Never commit account_id to this public repo.
+  // DO namespace created implicitly on first `wrangler deploy` — no separate CLI command needed.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AUDIT_DO",
+        "class_name": "AuditDO"
+      }
+    ]
+  },
+  // new_sqlite_classes — not new_classes — required for DO SQLite API (decision build-plan).
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AuditDO"]
+    }
+  ],
+  // Shared R2 bucket. Per-client isolation enforced by key prefix {client_id}/{event_id} in do.ts.
+  // Never per-client buckets — bindings are static; prefix isolation is sufficient (decision build-plan).
+  "r2_buckets": [
+    {
+      "binding": "AUDIT_PAYLOADS",
+      "bucket_name": "audit-payloads"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "routes": [{ "pattern": "audit-event.kajaril.com", "custom_domain": true }]
+}

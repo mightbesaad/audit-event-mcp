@@ -1,0 +1,68 @@
+# .claudeignore for @kajaril/audit-event-mcp
+#
+# Patterns Claude Code MUST NOT read or modify. Working around this file is a
+# flag — stop and ask if a task seems to need an excluded path.
+
+# ---------------------------------------------------------------------------
+# Secrets — never read, never write, never acknowledge as paths to suggest
+# ---------------------------------------------------------------------------
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+*.secret
+*.secrets
+*secret*
+*credential*
+*credentials*
+*token*
+*.key
+*.pem
+*.p12
+*.pfx
+*_rsa
+*_dsa
+*_ed25519
+*_ecdsa
+
+# ---------------------------------------------------------------------------
+# Build artifacts and local state
+# ---------------------------------------------------------------------------
+node_modules/
+.wrangler/
+dist/
+build/
+out/
+.cache/
+coverage/
+.vitest_cache/
+
+# ---------------------------------------------------------------------------
+# Git internals
+# ---------------------------------------------------------------------------
+.git/
+.gitattributes.local
+
+# ---------------------------------------------------------------------------
+# IDE and editor metadata
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+.DS_Store
+
+# ---------------------------------------------------------------------------
+# OS and tooling temp files
+# ---------------------------------------------------------------------------
+*.log
+*.tmp
+*.temp
+.npm/
+
+# ---------------------------------------------------------------------------
+# Applied migrations — additive only, never edited in place.
+# New changes go in 0002_*.sql, not edits to 0001.
+# ---------------------------------------------------------------------------
+migrations/0001_init.sql

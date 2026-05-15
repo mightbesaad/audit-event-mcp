@@ -1,0 +1,50 @@
+{
+  "name": "@kajaril/audit-event-mcp",
+  "version": "0.1.0",
+  "description": "Agent steward infrastructure — hash-chained audit log, Merkle notary, and GDPR/AI-Act compliance skill.",
+  "license": "MIT",
+  "author": "kajaril <studio@kajaril.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kajaril/audit-event-mcp.git"
+  },
+  "homepage": "https://kajaril.com/audit-event/",
+  "bugs": "https://github.com/kajaril/audit-event-mcp/issues",
+  "keywords": [
+    "mcp",
+    "audit",
+    "eu-ai-act",
+    "gdpr",
+    "cloudflare-workers",
+    "durable-objects",
+    "compliance"
+  ],
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:notary": "wrangler deploy --config wrangler.notary.jsonc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check src",
+    "format": "biome check --write src",
+    "typecheck": "tsc --noEmit",
+    "prepare": "git config core.hooksPath .githooks"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.2.3",
+    "hono": "^4.6.0",
+    "uuidv7": "^1.0.2",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.0.0"
+  }
+}
