@@ -1,7 +1,7 @@
 import { uuidv7 } from "uuidv7";
 import { computeChainHash, computeInputHash } from "@/lib/hash";
 import { DoRecordRequestSchema } from "@/lib/schema";
-import type { Env, RecordResult, VerifyResult } from "@/lib/types";
+import type { DossierResult, Env, RecordResult, VerifyResult } from "@/lib/types";
 
 // Schema is applied on first DO init. migrations/0001_init.sql is the canonical doc copy.
 const SCHEMA_SQL = `
@@ -33,9 +33,11 @@ CREATE INDEX IF NOT EXISTS idx_created ON audit_events(created_at);
 
 export class AuditDO implements DurableObject {
   private readonly sql: SqlStorage;
+  private readonly env: Env;
 
-  constructor(state: DurableObjectState, _env: Env) {
+  constructor(state: DurableObjectState, env: Env) {
     this.sql = state.storage.sql;
+    this.env = env;
     this.sql.exec(SCHEMA_SQL);
   }
 
@@ -236,11 +238,55 @@ export class AuditDO implements DurableObject {
   }
 
   private async handleDossier(request: Request): Promise<Response> {
-    // TODO(M8-next): generate signed JSON-L, upload to R2, return presigned URL (1h)
     const raw = (await request.json()) as { subjectId?: string };
     if (!raw.subjectId) {
       return Response.json({ error: "subjectId required" }, { status: 400 });
     }
-    return Response.json({ error: "export_dossier not yet implemented" }, { status: 501 });
+    if (!this.env.AUDIT_PAYLOADS) {
+      return Response.json({ error: "R2 not configured" }, { status: 503 });
+    }
+
+    const clientId = request.headers.get("X-Client-Id") ?? "unknown";
+    const baseUrl = request.headers.get("X-Base-Url") ?? "";
+
+    // input_hash and payload_ref are intentionally excluded
+    const rows = this.sql
+      .exec<{
+        id: string;
+        agent_id: string;
+        session_id: string;
+        event_type: string;
+        lawful_basis: string | null;
+        purpose: string;
+        subject_id: string | null;
+        retention_days: number;
+        chain_hash: string;
+        merkle_root: string | null;
+        notary_sig: string | null;
+        created_at: string;
+      }>(
+        `SELECT id, agent_id, session_id, event_type, lawful_basis, purpose,
+                subject_id, retention_days, chain_hash, merkle_root, notary_sig, created_at
+         FROM audit_events WHERE subject_id = ? ORDER BY created_at ASC`,
+        raw.subjectId,
+      )
+      .toArray();
+
+    const ndjson = rows.map((row) => `${JSON.stringify(row)}\n`).join("");
+    const uuid = uuidv7();
+    const key = `dossier/${clientId}/${uuid}.jsonl`;
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    await this.env.AUDIT_PAYLOADS.put(key, ndjson, {
+      httpMetadata: { contentType: "application/x-ndjson" },
+      customMetadata: { expiresAt, subjectId: raw.subjectId },
+    });
+
+    const result: DossierResult = {
+      url: `${baseUrl}/dossier/${clientId}/${uuid}`,
+      expiresAt,
+      eventCount: rows.length,
+    };
+    return Response.json(result);
   }
 }

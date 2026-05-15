@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync, SqliteValue } from "node:sqlite";
 import { AuditDO } from "@/do";
-import type { Env, RecordResult, VerifyResult } from "@/lib/types";
+import type { DossierResult, Env, RecordResult, VerifyResult } from "@/lib/types";
 
 // node:sqlite is a stable built-in since Node 22.5.
 // It's dynamically required here to avoid import errors on older Node.
@@ -50,13 +50,29 @@ function makeState(db: DatabaseSync): DurableObjectState {
 
 const fakeEnv = {} as unknown as Env;
 
-function post(path: string, body: unknown): Request {
+function post(path: string, body: unknown, headers?: Record<string, string>): Request {
   return new Request(`https://do-internal${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
+
+function makeMockR2(): R2Bucket {
+  const store = new Map<string, { body: string; customMetadata?: Record<string, string> }>();
+  return {
+    async put(
+      key: string,
+      value: unknown,
+      options?: { httpMetadata?: unknown; customMetadata?: Record<string, string> },
+    ) {
+      store.set(key, { body: String(value), customMetadata: options?.customMetadata });
+      return {} as R2Object;
+    },
+  } as unknown as R2Bucket;
+}
+
+const DOSSIER_HEADERS = { "X-Client-Id": "client-test", "X-Base-Url": "https://audit.example.com" };
 
 const BASE_EVENT = {
   eventType: "tool.call" as const,
@@ -229,9 +245,59 @@ describe("AuditDO", () => {
     expect(res.status).toBe(400);
   });
 
-  it("dossier with subjectId returns 501 (not yet implemented)", async () => {
-    const res = await do_.fetch(post("/dossier", { subjectId: "user-1" }));
-    expect(res.status).toBe(501);
+  it("dossier without R2 returns 503", async () => {
+    const res = await do_.fetch(post("/dossier", { subjectId: "user-1" }, DOSSIER_HEADERS));
+    expect(res.status).toBe(503);
+  });
+
+  it("dossier with matching events returns 200 with correct eventCount and url", async () => {
+    const r2 = makeMockR2();
+    const doR2 = new AuditDO(makeState(db), { ...fakeEnv, AUDIT_PAYLOADS: r2 });
+    await doR2.fetch(post("/record", { ...BASE_EVENT, subjectId: "user-1", input: { x: 1 } }));
+    await doR2.fetch(post("/record", { ...BASE_EVENT, subjectId: "user-1", input: { x: 2 } }));
+    await doR2.fetch(post("/record", { ...BASE_EVENT, subjectId: "user-2", input: { x: 3 } }));
+
+    const res = await doR2.fetch(post("/dossier", { subjectId: "user-1" }, DOSSIER_HEADERS));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DossierResult;
+    expect(body.eventCount).toBe(2);
+    expect(body.url).toContain("client-test");
+    expect(body.url).toContain("https://audit.example.com/dossier/");
+    expect(body.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("dossier with no matching events returns 200 with eventCount 0", async () => {
+    const r2 = makeMockR2();
+    const doR2 = new AuditDO(makeState(db), { ...fakeEnv, AUDIT_PAYLOADS: r2 });
+    const res = await doR2.fetch(post("/dossier", { subjectId: "nobody" }, DOSSIER_HEADERS));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as DossierResult;
+    expect(body.eventCount).toBe(0);
+    expect(body.url).toContain("https://audit.example.com/dossier/");
+  });
+
+  it("dossier does not return input_hash in exported events", async () => {
+    const r2 = makeMockR2();
+    let capturedBody = "";
+    const origPut = (r2 as unknown as Record<string, unknown>).put as (
+      k: string,
+      v: unknown,
+      o?: unknown,
+    ) => unknown;
+    (r2 as unknown as Record<string, unknown>).put = async (
+      k: string,
+      v: unknown,
+      o?: unknown,
+    ) => {
+      capturedBody = String(v);
+      return origPut(k, v, o);
+    };
+
+    const doR2 = new AuditDO(makeState(db), { ...fakeEnv, AUDIT_PAYLOADS: r2 });
+    await doR2.fetch(post("/record", { ...BASE_EVENT, subjectId: "user-1", input: { secret: "x" } }));
+    await doR2.fetch(post("/dossier", { subjectId: "user-1" }, DOSSIER_HEADERS));
+
+    expect(capturedBody).not.toContain("input_hash");
   });
 
   // --- routing ---

@@ -132,9 +132,15 @@ app.post("/mcp", async (c) => {
     }
 
     try {
+      const doHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (doPath === "/dossier") {
+        const reqUrl = new URL(c.req.url);
+        doHeaders["X-Client-Id"] = clientId;
+        doHeaders["X-Base-Url"] = `${reqUrl.protocol}//${reqUrl.host}`;
+      }
       const doRes = await stub.fetch(`https://do-internal${doPath}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: doHeaders,
         body: JSON.stringify(toolArgs),
       });
       const result = await doRes.json();
@@ -156,6 +162,29 @@ app.post("/mcp", async (c) => {
     },
     404,
   );
+});
+
+app.get("/dossier/:clientId/:uuid", async (c) => {
+  if (!c.env.AUDIT_PAYLOADS) {
+    return c.json({ error: "R2 not configured" }, 503);
+  }
+  const { clientId, uuid } = c.req.param();
+  const key = `dossier/${clientId}/${uuid}.jsonl`;
+  const obj = await c.env.AUDIT_PAYLOADS.get(key);
+  if (!obj) {
+    return c.json({ error: "Not found" }, 404);
+  }
+  const expiresAt = obj.customMetadata?.expiresAt;
+  if (expiresAt && new Date(expiresAt) < new Date()) {
+    await c.env.AUDIT_PAYLOADS.delete(key);
+    return c.json({ error: "Dossier expired" }, 410);
+  }
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": "application/x-ndjson",
+      "Content-Disposition": `attachment; filename="${uuid}.jsonl"`,
+    },
+  });
 });
 
 export default { fetch: app.fetch };
