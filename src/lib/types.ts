@@ -20,7 +20,6 @@ export interface AuditLogConfig {
   doNamespace: DurableObjectNamespace;
   clientId: string;
   r2Bucket?: R2Bucket;
-  notaryEndpoint?: string;
   defaultLawfulBasis?: LawfulBasis;
   defaultRetentionDays?: number;
 }
@@ -78,5 +77,5 @@ export interface DossierResult {
 export interface Env {
   AUDIT_DO: DurableObjectNamespace;
   AUDIT_PAYLOADS?: R2Bucket;
-  NOTARY_ENDPOINT?: string;
+  NOTARY?: Fetcher;
 }

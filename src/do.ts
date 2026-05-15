@@ -34,10 +34,12 @@ CREATE INDEX IF NOT EXISTS idx_created ON audit_events(created_at);
 export class AuditDO implements DurableObject {
   private readonly sql: SqlStorage;
   private readonly env: Env;
+  private readonly state: DurableObjectState;
 
   constructor(state: DurableObjectState, env: Env) {
     this.sql = state.storage.sql;
     this.env = env;
+    this.state = state;
     this.sql.exec(SCHEMA_SQL);
   }
 
@@ -113,6 +115,8 @@ export class AuditDO implements DurableObject {
       input.stripeCardId ?? null,
       input.stripeAuthorizationId ?? null,
     );
+
+    await this.scheduleAlarmIfNeeded();
 
     const result: RecordResult = { id, chainHash };
     return Response.json(result);
@@ -235,6 +239,50 @@ export class AuditDO implements DurableObject {
       .toArray();
 
     return Response.json({ events: rows, count: rows.length });
+  }
+
+  // Called by CF runtime when the scheduled alarm fires — flushes all pending events.
+  async alarm(): Promise<void> {
+    await this.notarizePending();
+  }
+
+  private async scheduleAlarmIfNeeded(): Promise<void> {
+    const existing = await this.state.storage.getAlarm?.();
+    if (existing !== null && existing !== undefined) return;
+    await this.state.storage.setAlarm?.(Date.now() + 15 * 60 * 1000);
+  }
+
+  private async notarizePending(): Promise<void> {
+    if (!this.env.NOTARY) return;
+    const pending = this.sql
+      .exec<{ id: string; chain_hash: string }>(
+        "SELECT id, chain_hash FROM audit_events WHERE merkle_root IS NULL ORDER BY id ASC LIMIT 1000",
+      )
+      .toArray();
+    if (pending.length === 0) return;
+    const events = pending.map((r) => ({ id: r.id, chainHash: r.chain_hash }));
+    try {
+      const res = await this.env.NOTARY.fetch("https://notary-internal/sign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ events }),
+      });
+      if (!res.ok) return;
+      const { merkleRoot, notarySig } = (await res.json()) as {
+        merkleRoot: string;
+        notarySig: string;
+      };
+      for (const { id } of pending) {
+        this.sql.exec(
+          "UPDATE audit_events SET merkle_root = ?, notary_sig = ? WHERE id = ?",
+          merkleRoot,
+          notarySig,
+          id,
+        );
+      }
+    } catch {
+      // Notary unavailable — events remain pending for next alarm cycle
+    }
   }
 
   private async handleDossier(request: Request): Promise<Response> {
