@@ -127,6 +127,15 @@ app.get("/health", (c) => {
   return c.json({ status: "ok", product: "audit-event-mcp", version: "0.1.0" });
 });
 
+app.get("/.well-known/mcp/server-card.json", (c) => {
+  return c.json({
+    serverInfo: { name: "audit-event-mcp", version: "0.1.0" },
+    tools: MCP_TOOL_DEFINITIONS,
+    resources: [],
+    prompts: [],
+  });
+});
+
 app.get("/mcp", (c) => {
   return c.json(
     {
