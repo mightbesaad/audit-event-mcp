@@ -9,9 +9,104 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.use("*", cors({ origin: "*" }));
 
-// CF Access JWT decode — extracts custom.client_id claim.
-// CF Access validates the JWT signature at the network layer before the Worker receives the request.
-// Worker-side signature verification against JWKS is deferred to M8-next.
+// --- JWKS-verified JWT extraction ---
+
+type CfJwk = JsonWebKey & { kid: string };
+
+const JWKS_TTL_MS = 5 * 60 * 1000;
+const jwksByDomain = new Map<string, { keys: CfJwk[]; fetchedAt: number }>();
+
+function base64UrlDecode(s: string): Uint8Array {
+  const padded = s
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(Math.ceil(s.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+async function fetchJwks(teamDomain: string): Promise<CfJwk[]> {
+  const cached = jwksByDomain.get(teamDomain);
+  if (cached && Date.now() - cached.fetchedAt < JWKS_TTL_MS) return cached.keys;
+  const res = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
+  if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
+  const data = (await res.json()) as { keys: CfJwk[] };
+  jwksByDomain.set(teamDomain, { keys: data.keys, fetchedAt: Date.now() });
+  return data.keys;
+}
+
+// Verifies a CF Access JWT against the team's published JWKS and returns the
+// custom.client_id claim, or null if verification fails for any reason.
+// Supports ES256 and RS256.
+export async function verifyJwt(jwt: string, teamDomain: string): Promise<string | null> {
+  const parts = jwt.split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
+
+  let header: { alg?: string; kid?: string };
+  let payload: Record<string, unknown>;
+  try {
+    header = JSON.parse(new TextDecoder().decode(base64UrlDecode(headerB64)));
+    payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(payloadB64)));
+  } catch {
+    return null;
+  }
+
+  const { alg, kid } = header;
+  if (!alg || !kid) return null;
+
+  if (typeof payload.exp === "number" && payload.exp < Date.now() / 1000) return null;
+
+  try {
+    const keys = await fetchJwks(teamDomain);
+    const jwk = keys.find((k) => k.kid === kid);
+    if (!jwk) return null;
+
+    if (alg !== "ES256" && alg !== "RS256") return null;
+
+    const cryptoKey =
+      alg === "ES256"
+        ? await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, [
+            "verify",
+          ])
+        : await crypto.subtle.importKey(
+            "jwk",
+            jwk,
+            { name: "RSASSA-PKCS1-v1_5", hash: { name: "SHA-256" } },
+            false,
+            ["verify"],
+          );
+
+    const message = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+    const signature = base64UrlDecode(sigB64);
+
+    const valid =
+      alg === "ES256"
+        ? await crypto.subtle.verify(
+            { name: "ECDSA", hash: { name: "SHA-256" } },
+            cryptoKey,
+            signature,
+            message,
+          )
+        : await crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, cryptoKey, signature, message);
+    if (!valid) return null;
+  } catch {
+    return null;
+  }
+
+  const custom = payload.custom;
+  if (typeof custom !== "object" || custom === null) return null;
+  const clientId = (custom as Record<string, unknown>).client_id;
+  return typeof clientId === "string" ? clientId : null;
+}
+
+// Fallback used when CF_ACCESS_TEAM_DOMAIN is not configured.
+// CF Access validates the JWT signature at the network layer before the Worker
+// receives the request, so this is safe. verifyJwt adds defence-in-depth.
 function extractClientId(jwt: string): string | null {
   const parts = jwt.split(".");
   if (parts.length !== 3) return null;
@@ -48,7 +143,13 @@ app.post("/mcp", async (c) => {
     return c.json({ error: "Unauthorized", detail: "CF Access token required" }, 401);
   }
 
-  const clientId = extractClientId(jwtHeader);
+  let clientId: string | null;
+  if (c.env.CF_ACCESS_TEAM_DOMAIN) {
+    clientId = await verifyJwt(jwtHeader, c.env.CF_ACCESS_TEAM_DOMAIN);
+  } else {
+    clientId = extractClientId(jwtHeader);
+  }
+
   if (!clientId) {
     return c.json({ error: "Unauthorized", detail: "Invalid CF Access token" }, 401);
   }

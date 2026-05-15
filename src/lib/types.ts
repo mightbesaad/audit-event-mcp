@@ -78,4 +78,5 @@ export interface Env {
   AUDIT_DO: DurableObjectNamespace;
   AUDIT_PAYLOADS?: R2Bucket;
   NOTARY?: Fetcher;
+  CF_ACCESS_TEAM_DOMAIN?: string;
 }
