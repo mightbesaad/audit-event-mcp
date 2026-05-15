@@ -1,0 +1,12 @@
+#!/bin/sh
+# Biome check on staged TypeScript files. Pre-commit gate — no exceptions.
+# Also blocks commits with .only in tests.
+set -e
+
+if grep -r "\.only(" test/ src/ --include="*.ts" -l 2>/dev/null | grep -q .; then
+  echo "ERROR: .only() found in test files — remove before committing"
+  exit 1
+fi
+
+npx biome check --write src/
+git add src/

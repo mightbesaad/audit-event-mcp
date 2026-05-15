@@ -1,0 +1,14 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server-manifest.json",
+  "name": "@kajaril/audit-event-mcp",
+  "displayName": "Audit Event MCP",
+  "description": "Agent steward infrastructure — hash-chained audit log, Merkle notary, GDPR/AI-Act compliance skill.",
+  "license": "MIT",
+  "homepage": "https://kajaril.com/audit-event/",
+  "repository": "https://github.com/kajaril/audit-event-mcp",
+  "category": "compliance",
+  "tags": ["audit", "gdpr", "eu-ai-act", "durable-objects", "mcp"],
+  "endpoints": {
+    "http": "https://audit-event.kajaril.com/mcp"
+  }
+}
