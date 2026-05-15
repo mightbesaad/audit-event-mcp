@@ -69,6 +69,12 @@ export interface VerifyResult {
   broken: { id: string; expected: string; actual: string }[];
 }
 
+export interface DossierResult {
+  url: string;
+  expiresAt: string;
+  eventCount: number;
+}
+
 export interface Env {
   AUDIT_DO: DurableObjectNamespace;
   AUDIT_PAYLOADS?: R2Bucket;
