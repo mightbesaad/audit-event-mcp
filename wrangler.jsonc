@@ -28,6 +28,9 @@
       "bucket_name": "audit-payloads"
     }
   ],
+  "services": [
+    { "binding": "NOTARY", "service": "audit-event-notary" }
+  ],
   "observability": {
     "enabled": true
   },

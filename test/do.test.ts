@@ -44,8 +44,23 @@ function makeSqlStorage(db: DatabaseSync) {
 
 function makeState(db: DatabaseSync): DurableObjectState {
   return {
-    storage: { sql: makeSqlStorage(db) },
+    storage: {
+      sql: makeSqlStorage(db),
+      getAlarm: async () => null,
+      setAlarm: async () => {},
+    },
   } as unknown as DurableObjectState;
+}
+
+function makeMockNotary(): Fetcher {
+  return {
+    async fetch(_req: RequestInfo, _init?: RequestInit) {
+      return Response.json({
+        merkleRoot: "a".repeat(64),
+        notarySig: "b".repeat(128),
+      });
+    },
+  } as unknown as Fetcher;
 }
 
 const fakeEnv = {} as unknown as Env;
@@ -298,6 +313,64 @@ describe("AuditDO", () => {
     await doR2.fetch(post("/dossier", { subjectId: "user-1" }, DOSSIER_HEADERS));
 
     expect(capturedBody).not.toContain("input_hash");
+  });
+
+  // --- alarm / notarization ---
+
+  it("alarm is no-op when NOTARY not bound", async () => {
+    await do_.fetch(post("/record", { ...BASE_EVENT, input: { x: 1 } }));
+    await do_.alarm();
+    const row = db
+      .prepare("SELECT merkle_root FROM audit_events LIMIT 1")
+      .get() as { merkle_root: string | null } | undefined;
+    expect(row?.merkle_root).toBeNull();
+  });
+
+  it("alarm stamps merkle_root and notary_sig on all pending events", async () => {
+    const notary = makeMockNotary();
+    const doN = new AuditDO(makeState(db), { ...fakeEnv, NOTARY: notary });
+    await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 1 } }));
+    await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 2 } }));
+    await doN.alarm();
+    const rows = db
+      .prepare("SELECT merkle_root, notary_sig FROM audit_events")
+      .all() as Array<{ merkle_root: string | null; notary_sig: string | null }>;
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.merkle_root).not.toBeNull();
+      expect(row.notary_sig).not.toBeNull();
+    }
+  });
+
+  it("all events in a batch share the same merkle_root", async () => {
+    const notary = makeMockNotary();
+    const doN = new AuditDO(makeState(db), { ...fakeEnv, NOTARY: notary });
+    await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 1 } }));
+    await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 2 } }));
+    await doN.alarm();
+    const roots = db
+      .prepare("SELECT DISTINCT merkle_root FROM audit_events")
+      .all() as Array<{ merkle_root: string }>;
+    expect(roots).toHaveLength(1);
+  });
+
+  it("second alarm after all events notarized is a no-op", async () => {
+    const notary = makeMockNotary();
+    let callCount = 0;
+    const countingNotary: Fetcher = {
+      async fetch(_req: RequestInfo, _init?: RequestInit) {
+        callCount++;
+        return Response.json({ merkleRoot: "a".repeat(64), notarySig: "b".repeat(128) });
+      },
+    } as unknown as Fetcher;
+    const doN = new AuditDO(makeState(db), { ...fakeEnv, NOTARY: countingNotary });
+    await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 1 } }));
+    await doN.alarm();
+    expect(callCount).toBe(1);
+    await doN.alarm(); // all events already notarized — should not call notary
+    expect(callCount).toBe(1);
+
+    void notary; // suppress unused variable warning
   });
 
   // --- routing ---

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeChainHash, computeInputHash } from "../src/lib/hash";
+import { buildMerkleRoot, computeChainHash, computeInputHash } from "../src/lib/hash";
 
 describe("computeInputHash", () => {
   it("returns 64-char lowercase hex string", async () => {
@@ -74,6 +74,64 @@ describe("computeChainHash", () => {
     const h1 = await computeChainHash({ ...base, eventType: "tool.call" });
     const h2 = await computeChainHash({ ...base, eventType: "decision.made" });
     expect(h1).not.toBe(h2);
+  });
+});
+
+describe("buildMerkleRoot", () => {
+  it("single leaf returns a 64-char hex string", async () => {
+    const root = await buildMerkleRoot([{ id: "id0", chainHash: "a".repeat(64) }]);
+    expect(root).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("two leaves return a deterministic root", async () => {
+    const leaves = [
+      { id: "id0", chainHash: "a".repeat(64) },
+      { id: "id1", chainHash: "b".repeat(64) },
+    ];
+    expect(await buildMerkleRoot(leaves)).toBe(await buildMerkleRoot(leaves));
+  });
+
+  it("result changes when a leaf changes", async () => {
+    const base = [
+      { id: "id0", chainHash: "a".repeat(64) },
+      { id: "id1", chainHash: "b".repeat(64) },
+    ];
+    const mutated = [
+      { id: "id0", chainHash: "a".repeat(64) },
+      { id: "id1", chainHash: "c".repeat(64) },
+    ];
+    expect(await buildMerkleRoot(base)).not.toBe(await buildMerkleRoot(mutated));
+  });
+
+  it("leaves are sorted by id before hashing (order-independent)", async () => {
+    const fwd = [
+      { id: "id0", chainHash: "a".repeat(64) },
+      { id: "id1", chainHash: "b".repeat(64) },
+    ];
+    const rev = [
+      { id: "id1", chainHash: "b".repeat(64) },
+      { id: "id0", chainHash: "a".repeat(64) },
+    ];
+    expect(await buildMerkleRoot(fwd)).toBe(await buildMerkleRoot(rev));
+  });
+
+  it("odd number of leaves duplicates last (three leaves)", async () => {
+    const root3 = await buildMerkleRoot([
+      { id: "id0", chainHash: "a".repeat(64) },
+      { id: "id1", chainHash: "b".repeat(64) },
+      { id: "id2", chainHash: "c".repeat(64) },
+    ]);
+    expect(root3).toMatch(/^[0-9a-f]{64}$/);
+    // Should differ from a 2-leaf tree and a 4-leaf tree
+    const root2 = await buildMerkleRoot([
+      { id: "id0", chainHash: "a".repeat(64) },
+      { id: "id1", chainHash: "b".repeat(64) },
+    ]);
+    expect(root3).not.toBe(root2);
+  });
+
+  it("throws on empty leaves", async () => {
+    await expect(buildMerkleRoot([])).rejects.toThrow();
   });
 });
 
