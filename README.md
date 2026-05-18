@@ -4,6 +4,7 @@ Agent steward infrastructure — hash-chained audit log with Merkle notarisation
 
 [![CI](https://github.com/kajaril/audit-event-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/kajaril/audit-event-mcp/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@kajaril/audit-event-mcp)](https://www.npmjs.com/package/@kajaril/audit-event-mcp)
+[![npm downloads](https://img.shields.io/npm/dw/@kajaril/audit-event-mcp)](https://www.npmjs.com/package/@kajaril/audit-event-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Smithery](https://smithery.ai/badge/@kajaril/audit-event)](https://smithery.ai/server/@kajaril/audit-event)
 
@@ -186,7 +187,7 @@ Never run `wrangler deploy` from a dirty working tree. The deployed code must ma
 
 ```sh
 npm install
-npm test          # 34 tests (node:sqlite adapter, no cloudflare/vitest-pool-workers)
+npm test          # 81 tests (node:sqlite adapter, no cloudflare/vitest-pool-workers)
 npm run typecheck
 npm run lint
 ```
