@@ -6,10 +6,10 @@
   "author": "kajaril <studio@kajaril.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kajaril/audit-event-mcp.git"
+    "url": "git+https://github.com/mightbesaad/audit-event-mcp.git"
   },
   "homepage": "https://kajaril.com/audit-event/",
-  "bugs": "https://github.com/kajaril/audit-event-mcp/issues",
+  "bugs": "https://github.com/mightbesaad/audit-event-mcp/issues",
   "keywords": [
     "mcp",
     "audit",

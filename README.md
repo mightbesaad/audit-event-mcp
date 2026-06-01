@@ -2,7 +2,7 @@
 
 Agent steward infrastructure — hash-chained audit log with Merkle notarisation and a GDPR/AI-Act compliance skill.
 
-[![CI](https://github.com/kajaril/audit-event-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/kajaril/audit-event-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/mightbesaad/audit-event-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mightbesaad/audit-event-mcp/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@kajaril/audit-event-mcp)](https://www.npmjs.com/package/@kajaril/audit-event-mcp)
 [![npm downloads](https://img.shields.io/npm/dw/@kajaril/audit-event-mcp)](https://www.npmjs.com/package/@kajaril/audit-event-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
