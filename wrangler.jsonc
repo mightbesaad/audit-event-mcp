@@ -2,6 +2,10 @@
   "name": "audit-event-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-02-24",
+  // Disable the *.workers.dev URL: tenant isolation depends on requests arriving through the
+  // CF Access policy bound to the custom domain. A live workers.dev URL bypasses that policy,
+  // so the only host for this Worker is audit-event.kajaril.com (route below).
+  "workers_dev": false,
   // account_id omitted — Wrangler infers from auth context.
   // Never commit account_id to this public repo.
   // DO namespace created implicitly on first `wrangler deploy` — no separate CLI command needed.

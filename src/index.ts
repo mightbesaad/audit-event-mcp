@@ -104,25 +104,6 @@ export async function verifyJwt(jwt: string, teamDomain: string): Promise<string
   return typeof clientId === "string" ? clientId : null;
 }
 
-// Fallback used when CF_ACCESS_TEAM_DOMAIN is not configured.
-// CF Access validates the JWT signature at the network layer before the Worker
-// receives the request, so this is safe. verifyJwt adds defence-in-depth.
-function extractClientId(jwt: string): string | null {
-  const parts = jwt.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const padded = (parts[1] ?? "").replace(/-/g, "+").replace(/_/g, "/");
-    const json = atob(padded.padEnd(Math.ceil(padded.length / 4) * 4, "="));
-    const payload = JSON.parse(json) as Record<string, unknown>;
-    const custom = payload.custom;
-    if (typeof custom !== "object" || custom === null) return null;
-    const clientId = (custom as Record<string, unknown>).client_id;
-    return typeof clientId === "string" ? clientId : null;
-  } catch {
-    return null;
-  }
-}
-
 app.get("/health", (c) => {
   return c.json({ status: "ok", product: "audit-event-mcp", version: "0.1.0" });
 });
@@ -152,13 +133,21 @@ app.post("/mcp", async (c) => {
     return c.json({ error: "Unauthorized", detail: "CF Access token required" }, 401);
   }
 
-  let clientId: string | null;
-  if (c.env.CF_ACCESS_TEAM_DOMAIN) {
-    clientId = await verifyJwt(jwtHeader, c.env.CF_ACCESS_TEAM_DOMAIN);
-  } else {
-    clientId = extractClientId(jwtHeader);
+  // Fail closed: the client_id claim selects the per-tenant Durable Object and R2 prefix, so it
+  // MUST come from a signature-verified token. Without CF_ACCESS_TEAM_DOMAIN we cannot fetch the
+  // JWKS to verify, and decoding the payload unverified would let anyone forge custom.client_id
+  // and impersonate any tenant (e.g. by hitting the *.workers.dev URL, which is not behind the
+  // Access policy bound to the custom domain). Refuse rather than trust the upstream proxy.
+  if (!c.env.CF_ACCESS_TEAM_DOMAIN) {
+    return c.json(
+      {
+        error: "Server misconfigured",
+        detail: "CF_ACCESS_TEAM_DOMAIN is not set; refusing to process unverified tokens",
+      },
+      503,
+    );
   }
-
+  const clientId = await verifyJwt(jwtHeader, c.env.CF_ACCESS_TEAM_DOMAIN);
   if (!clientId) {
     return c.json({ error: "Unauthorized", detail: "Invalid CF Access token" }, 401);
   }
