@@ -3,6 +3,16 @@ import { computeChainHash, computeInputHash } from "@/lib/hash";
 import { DoRecordRequestSchema } from "@/lib/schema";
 import type { DossierResult, Env, RecordResult, VerifyResult } from "@/lib/types";
 
+// Unguessable capability token for the unauthenticated dossier download URL. Uses 256 bits of
+// CSPRNG output rather than uuidv7: a dossier link is a bearer capability to a data subject's
+// exported records, and uuidv7 is time-ordered (~48 bits are a timestamp, leaking creation time
+// and leaving only ~74 random bits) — the wrong primitive for a secret URL.
+function dossierToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 // Schema is applied on first DO init. migrations/0001_init.sql is the canonical doc copy.
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -321,8 +331,8 @@ export class AuditDO implements DurableObject {
       .toArray();
 
     const ndjson = rows.map((row) => `${JSON.stringify(row)}\n`).join("");
-    const uuid = uuidv7();
-    const key = `dossier/${clientId}/${uuid}.jsonl`;
+    const token = dossierToken();
+    const key = `dossier/${clientId}/${token}.jsonl`;
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
     await this.env.AUDIT_PAYLOADS.put(key, ndjson, {
@@ -331,7 +341,7 @@ export class AuditDO implements DurableObject {
     });
 
     const result: DossierResult = {
-      url: `${baseUrl}/dossier/${clientId}/${uuid}`,
+      url: `${baseUrl}/dossier/${clientId}/${token}`,
       expiresAt,
       eventCount: rows.length,
     };

@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { verifyJwt } from "../src/index";
+import worker, { verifyJwt } from "../src/index";
 
 // --- helpers ---
 
@@ -126,5 +126,32 @@ describe("verifyJwt — JWKS fetch errors", () => {
     const result = await verifyJwt(await makeJwt(), "broken.cloudflareaccess.com");
     expect(result).toBeNull();
     vi.unstubAllGlobals();
+  });
+});
+
+describe("POST /mcp — fail-closed auth", () => {
+  function mcpRequest(headers: Record<string, string>): Request {
+    return new Request("https://audit-event.kajaril.com/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+    });
+  }
+
+  it("returns 401 when no CF Access token is present", async () => {
+    const res = await worker.fetch(mcpRequest({}), {} as never, {} as never);
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 503 (refuses to trust an unverified token) when CF_ACCESS_TEAM_DOMAIN is unset", async () => {
+    // A forged token with an attacker-chosen client_id must NOT be honored just because the team
+    // domain is missing — the old code decoded it unverified and could impersonate any tenant.
+    const forged = await makeJwt({ custom: { client_id: "victim-tenant" } });
+    const res = await worker.fetch(
+      mcpRequest({ "CF-Access-Jwt-Assertion": forged }),
+      {} as never,
+      {} as never,
+    );
+    expect(res.status).toBe(503);
   });
 });
