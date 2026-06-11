@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
+import { beforeEach, describe, expect, it } from "vitest";
 import { computeChainHash, computeInputHash } from "../src/lib/hash";
 
 const { DatabaseSync: DBSync } = await import("node:sqlite");
@@ -121,9 +121,9 @@ function axis3(db: DatabaseSync): AxisResult {
 }
 
 function axis4(db: DatabaseSync): AxisResult {
-  const rows = db
-    .prepare("SELECT id FROM audit_events WHERE retention_days > 730")
-    .all() as Array<{ id: string }>;
+  const rows = db.prepare("SELECT id FROM audit_events WHERE retention_days > 730").all() as Array<{
+    id: string;
+  }>;
   return rows.length > 0 ? "fail" : "pass";
 }
 
@@ -160,9 +160,7 @@ async function axis5(db: DatabaseSync): Promise<{ result: AxisResult; broken: st
 
 function axis6(db: DatabaseSync): AxisResult {
   const row = db
-    .prepare(
-      `SELECT COUNT(*) as total, COUNT(merkle_root) as notarised FROM audit_events`,
-    )
+    .prepare(`SELECT COUNT(*) as total, COUNT(merkle_root) as notarised FROM audit_events`)
     .get() as { total: number; notarised: number };
   if (row.total === 0 || row.notarised === 0) return "skip";
   const coverage = row.notarised / row.total;
@@ -189,9 +187,7 @@ function axis7(db: DatabaseSync): AxisResult {
 
 function axis8(db: DatabaseSync): AxisResult {
   const row = db
-    .prepare(
-      `SELECT COUNT(*) as total, COUNT(payload_ref) as with_payload FROM audit_events`,
-    )
+    .prepare(`SELECT COUNT(*) as total, COUNT(payload_ref) as with_payload FROM audit_events`)
     .get() as { total: number; with_payload: number };
   if (row.total === 0) return "pass";
   const fraction = row.with_payload / row.total;
@@ -333,23 +329,51 @@ describe("Axis 5 — Chain integrity (tamper-evidence)", () => {
     const db = makeDb();
 
     const slot0 = await computeInputHash({ step: 0 });
-    const h0 = await computeChainHash({ id: "e0", eventType: "tool.call", inputHashSlot: slot0, prevHash: null });
+    const h0 = await computeChainHash({
+      id: "e0",
+      eventType: "tool.call",
+      inputHashSlot: slot0,
+      prevHash: null,
+    });
     insertEvent(db, {
-      id: "e0", eventType: "tool.call", inputHash: slot0, inputHashOmittedReason: null,
-      chainHash: h0, prevHash: null, createdAt: "2026-01-01T00:00:00.000Z",
+      id: "e0",
+      eventType: "tool.call",
+      inputHash: slot0,
+      inputHashOmittedReason: null,
+      chainHash: h0,
+      prevHash: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
     });
 
     const slot1 = await computeInputHash({ step: 1 });
-    const h1 = await computeChainHash({ id: "e1", eventType: "tool.result", inputHashSlot: slot1, prevHash: h0 });
+    const h1 = await computeChainHash({
+      id: "e1",
+      eventType: "tool.result",
+      inputHashSlot: slot1,
+      prevHash: h0,
+    });
     insertEvent(db, {
-      id: "e1", eventType: "tool.result", inputHash: slot1, inputHashOmittedReason: null,
-      chainHash: h1, prevHash: h0, createdAt: "2026-01-01T00:00:01.000Z",
+      id: "e1",
+      eventType: "tool.result",
+      inputHash: slot1,
+      inputHashOmittedReason: null,
+      chainHash: h1,
+      prevHash: h0,
+      createdAt: "2026-01-01T00:00:01.000Z",
     });
 
     // Third event uses omitted-reason (no_personal_data is the default)
-    const h2 = await computeChainHash({ id: "e2", eventType: "decision.made", inputHashSlot: "no_personal_data", prevHash: h1 });
+    const h2 = await computeChainHash({
+      id: "e2",
+      eventType: "decision.made",
+      inputHashSlot: "no_personal_data",
+      prevHash: h1,
+    });
     insertEvent(db, {
-      id: "e2", eventType: "decision.made", chainHash: h2, prevHash: h1,
+      id: "e2",
+      eventType: "decision.made",
+      chainHash: h2,
+      prevHash: h1,
       createdAt: "2026-01-01T00:00:02.000Z",
     });
 
@@ -361,10 +385,19 @@ describe("Axis 5 — Chain integrity (tamper-evidence)", () => {
   it("fail: tampered chain_hash is detected", async () => {
     const db = makeDb();
     const slot0 = await computeInputHash({ step: 0 });
-    const h0 = await computeChainHash({ id: "e0", eventType: "tool.call", inputHashSlot: slot0, prevHash: null });
+    const h0 = await computeChainHash({
+      id: "e0",
+      eventType: "tool.call",
+      inputHashSlot: slot0,
+      prevHash: null,
+    });
     insertEvent(db, {
-      id: "e0", eventType: "tool.call", inputHash: slot0, inputHashOmittedReason: null,
-      chainHash: h0, prevHash: null,
+      id: "e0",
+      eventType: "tool.call",
+      inputHash: slot0,
+      inputHashOmittedReason: null,
+      chainHash: h0,
+      prevHash: null,
     });
     db.prepare(
       "UPDATE audit_events SET chain_hash = 'deadbeef' || substr(chain_hash, 9) WHERE id = 'e0'",
@@ -416,21 +449,31 @@ describe("Axis 7 — High-risk event completeness (AI Act Art. 12–13)", () => 
   it("pass: session with human.turn also has tool.call", () => {
     const db = makeDb();
     insertEvent(db, {
-      sessionId: "s1", eventType: "human.turn", subjectId: "user-1",
+      sessionId: "s1",
+      eventType: "human.turn",
+      subjectId: "user-1",
       purpose: "User message received and logged",
     });
-    insertEvent(db, { sessionId: "s1", eventType: "tool.call", purpose: "Call external search API" });
+    insertEvent(db, {
+      sessionId: "s1",
+      eventType: "tool.call",
+      purpose: "Call external search API",
+    });
     expect(axis7(db)).toBe("pass");
   });
 
   it("pass: session with human.turn also has decision.made", () => {
     const db = makeDb();
     insertEvent(db, {
-      sessionId: "s1", eventType: "human.turn", subjectId: "user-1",
+      sessionId: "s1",
+      eventType: "human.turn",
+      subjectId: "user-1",
       purpose: "User message received and logged",
     });
     insertEvent(db, {
-      sessionId: "s1", eventType: "decision.made", purpose: "Route lead to enterprise queue",
+      sessionId: "s1",
+      eventType: "decision.made",
+      purpose: "Route lead to enterprise queue",
     });
     expect(axis7(db)).toBe("pass");
   });
@@ -444,10 +487,16 @@ describe("Axis 7 — High-risk event completeness (AI Act Art. 12–13)", () => 
   it("fail: session has human.turn but no tool.call or decision.made", () => {
     const db = makeDb();
     insertEvent(db, {
-      sessionId: "s1", eventType: "human.turn", subjectId: "user-1",
+      sessionId: "s1",
+      eventType: "human.turn",
+      subjectId: "user-1",
       purpose: "User message received and logged",
     });
-    insertEvent(db, { sessionId: "s1", eventType: "tool.result", purpose: "External API response" });
+    insertEvent(db, {
+      sessionId: "s1",
+      eventType: "tool.result",
+      purpose: "External API response",
+    });
     expect(axis7(db)).toBe("fail");
   });
 });

@@ -174,27 +174,62 @@ describe("buildMerkleRoot", () => {
 describe("chain integrity across a sequence of events", () => {
   it("3-event chain: each hash depends on the previous", async () => {
     const slot0 = await computeInputHash({ step: 0 });
-    const chain0 = await computeChainHash({ id: "id0", eventType: "tool.call", inputHashSlot: slot0, prevHash: null });
+    const chain0 = await computeChainHash({
+      id: "id0",
+      eventType: "tool.call",
+      inputHashSlot: slot0,
+      prevHash: null,
+    });
 
     const slot1 = await computeInputHash({ step: 1 });
-    const chain1 = await computeChainHash({ id: "id1", eventType: "tool.result", inputHashSlot: slot1, prevHash: chain0 });
+    const chain1 = await computeChainHash({
+      id: "id1",
+      eventType: "tool.result",
+      inputHashSlot: slot1,
+      prevHash: chain0,
+    });
 
     const slot2 = await computeInputHash({ step: 2 });
-    const chain2 = await computeChainHash({ id: "id2", eventType: "decision.made", inputHashSlot: slot2, prevHash: chain1 });
+    const chain2 = await computeChainHash({
+      id: "id2",
+      eventType: "decision.made",
+      inputHashSlot: slot2,
+      prevHash: chain1,
+    });
 
     expect(new Set([chain0, chain1, chain2]).size).toBe(3);
   });
 
   it("tampering event 0 cascades through the chain", async () => {
     const slot0 = await computeInputHash({ step: 0 });
-    const chain0 = await computeChainHash({ id: "id0", eventType: "tool.call", inputHashSlot: slot0, prevHash: null });
+    const chain0 = await computeChainHash({
+      id: "id0",
+      eventType: "tool.call",
+      inputHashSlot: slot0,
+      prevHash: null,
+    });
 
     const slot1 = await computeInputHash({ step: 1 });
-    const chain1 = await computeChainHash({ id: "id1", eventType: "tool.result", inputHashSlot: slot1, prevHash: chain0 });
+    const chain1 = await computeChainHash({
+      id: "id1",
+      eventType: "tool.result",
+      inputHashSlot: slot1,
+      prevHash: chain0,
+    });
 
     const tamperedSlot0 = await computeInputHash({ step: "TAMPERED" });
-    const tamperedChain0 = await computeChainHash({ id: "id0", eventType: "tool.call", inputHashSlot: tamperedSlot0, prevHash: null });
-    const tamperedChain1 = await computeChainHash({ id: "id1", eventType: "tool.result", inputHashSlot: slot1, prevHash: tamperedChain0 });
+    const tamperedChain0 = await computeChainHash({
+      id: "id0",
+      eventType: "tool.call",
+      inputHashSlot: tamperedSlot0,
+      prevHash: null,
+    });
+    const tamperedChain1 = await computeChainHash({
+      id: "id1",
+      eventType: "tool.result",
+      inputHashSlot: slot1,
+      prevHash: tamperedChain0,
+    });
 
     expect(tamperedChain0).not.toBe(chain0);
     expect(tamperedChain1).not.toBe(chain1);
@@ -202,14 +237,29 @@ describe("chain integrity across a sequence of events", () => {
 
   it("mixed-omission chain: omitted-reason slot preserves chain integrity", async () => {
     const inputHash = await computeInputHash({ data: "sensitive" });
-    const chain0 = await computeChainHash({ id: "id0", eventType: "human.turn", inputHashSlot: inputHash, prevHash: null });
+    const chain0 = await computeChainHash({
+      id: "id0",
+      eventType: "human.turn",
+      inputHashSlot: inputHash,
+      prevHash: null,
+    });
 
     // Second event: caller omitted input
-    const chain1 = await computeChainHash({ id: "id1", eventType: "tool.call", inputHashSlot: "no_personal_data", prevHash: chain0 });
+    const chain1 = await computeChainHash({
+      id: "id1",
+      eventType: "tool.call",
+      inputHashSlot: "no_personal_data",
+      prevHash: chain0,
+    });
 
     // Third event: real input again
     const slot2 = await computeInputHash({ result: "ok" });
-    const chain2 = await computeChainHash({ id: "id2", eventType: "tool.result", inputHashSlot: slot2, prevHash: chain1 });
+    const chain2 = await computeChainHash({
+      id: "id2",
+      eventType: "tool.result",
+      inputHashSlot: slot2,
+      prevHash: chain1,
+    });
 
     expect(new Set([chain0, chain1, chain2]).size).toBe(3);
   });

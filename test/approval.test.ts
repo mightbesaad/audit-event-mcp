@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditDO } from "@/do";
 import type { ApprovalCreateResult, ApprovalRecord, DecideResult } from "@/lib/approval";
 import { fakeEnv, makeState, post } from "./harness";
@@ -151,9 +151,7 @@ describe("AuditDO approvals", () => {
   });
 
   it("create rejects unknown channels", async () => {
-    const res = await do_.fetch(
-      post("/approval/create", { ...BASE_APPROVAL, channels: ["sms"] }),
-    );
+    const res = await do_.fetch(post("/approval/create", { ...BASE_APPROVAL, channels: ["sms"] }));
     expect(res.status).toBe(400);
   });
 
@@ -260,7 +258,9 @@ describe("AuditDO approvals", () => {
 
   it("second decide returns 409 already_decided with the terminal record", async () => {
     const created = await create();
-    await do_.fetch(post("/approval/decide", { approvalId: created.approvalId, decision: "approved" }));
+    await do_.fetch(
+      post("/approval/decide", { approvalId: created.approvalId, decision: "approved" }),
+    );
     const res = await do_.fetch(
       post("/approval/decide", { approvalId: created.approvalId, decision: "denied" }),
     );
@@ -315,7 +315,9 @@ describe("AuditDO approvals", () => {
 
   it("approval operations write nothing to audit_events", async () => {
     const created = await create();
-    await do_.fetch(post("/approval/decide", { approvalId: created.approvalId, decision: "approved" }));
+    await do_.fetch(
+      post("/approval/decide", { approvalId: created.approvalId, decision: "approved" }),
+    );
     const rows = db.prepare("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number };
     expect(rows.n).toBe(0);
   });

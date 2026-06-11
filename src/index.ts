@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { RESERVED_EVENT_TYPE_PREFIX } from "@/lib/schema";
 import type { Env } from "@/lib/types";
 import { MCP_TOOL_DEFINITIONS } from "@/mcp/tool-definitions";
 
@@ -209,6 +210,26 @@ app.post("/mcp", async (c) => {
         },
         400,
       );
+    }
+
+    // approval.* chain events are emitted by the witness itself when an approval is
+    // requested/decided. An agent recording one directly would fabricate human-decision
+    // evidence, so the public surface refuses them (D7).
+    if (toolName === "record_event") {
+      const eventType = (toolArgs as { eventType?: unknown }).eventType;
+      if (typeof eventType === "string" && eventType.startsWith(RESERVED_EVENT_TYPE_PREFIX)) {
+        return c.json(
+          {
+            jsonrpc: "2.0",
+            id: body.id,
+            error: {
+              code: -32602,
+              message: `${RESERVED_EVENT_TYPE_PREFIX}* event types are reserved — the witness records them when approvals are requested and decided`,
+            },
+          },
+          400,
+        );
+      }
     }
 
     const doId = c.env.AUDIT_DO.idFromName(`audit-do-${clientId}`);

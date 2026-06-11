@@ -8,6 +8,7 @@ import {
   isValidApprovalIdShape,
   isValidClientIdShape,
 } from "@/lib/approval";
+import { tenantStub } from "@/lib/approval-flow";
 import type { Env } from "@/lib/types";
 
 export { AuditDO } from "@/do";
@@ -18,13 +19,10 @@ export { AuditDO } from "@/do";
 // the default export below is exactly the Hono app from index.ts.
 export default worker;
 
-// Module-scope rather than a class method: Workers RPC exposes prototype methods to the binding
-// peer regardless of TypeScript visibility, and a helper that turns a clientId into a full DO
-// stub must never be part of the callable surface — the contract is get/decide only.
-function stubFor(env: Env, clientId: string): DurableObjectStub {
-  const doId = env.AUDIT_DO.idFromName(`audit-do-${clientId}`);
-  return env.AUDIT_DO.get(doId);
-}
+// DO-stub derivation stays off this class: Workers RPC exposes prototype methods to the
+// binding peer regardless of TypeScript visibility, and a helper that turns a clientId into
+// a full DO stub must never be part of the callable surface — the contract is get/decide
+// only. The shared definition lives in lib/approval-flow.ts (tenantStub).
 
 // Internal surface for go.kajaril.com ONLY (decision D1). A named WorkerEntrypoint is reachable
 // exclusively over a service binding that names it — it has no HTTP route, so the public worker's
@@ -36,7 +34,7 @@ export class ApprovalInternal extends WorkerEntrypoint<Env> implements ApprovalI
     // Shape checks are defense-in-depth: callers are trusted workers, but a malformed
     // clientId must never become a DO name.
     if (!isValidClientIdShape(clientId) || !isValidApprovalIdShape(approvalId)) return null;
-    const res = await stubFor(this.env, clientId).fetch("https://do-internal/approval/get", {
+    const res = await tenantStub(this.env, clientId).fetch("https://do-internal/approval/get", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ approvalId }),
@@ -55,7 +53,7 @@ export class ApprovalInternal extends WorkerEntrypoint<Env> implements ApprovalI
     if (!isValidClientIdShape(params.clientId) || !isValidApprovalIdShape(params.approvalId)) {
       return { ok: false, reason: "not_found" };
     }
-    const res = await stubFor(this.env, params.clientId).fetch(
+    const res = await tenantStub(this.env, params.clientId).fetch(
       "https://do-internal/approval/decide",
       {
         method: "POST",

@@ -1,11 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditDO } from "@/do";
 import worker from "@/index";
-// `cloudflare:workers` is aliased to test/stubs/cloudflare-workers.ts in vitest.config.ts
-import main, { ApprovalInternal } from "@/main";
 import type { ApprovalCreateResult } from "@/lib/approval";
 import type { Env } from "@/lib/types";
+// `cloudflare:workers` is aliased to test/stubs/cloudflare-workers.ts in vitest.config.ts
+import main, { ApprovalInternal } from "@/main";
 import { fakeEnv, makeState, post } from "./harness";
 
 const { DatabaseSync: DBSync } = await import("node:sqlite");

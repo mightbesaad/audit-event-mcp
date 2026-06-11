@@ -104,7 +104,7 @@ describe("go worker — approve page", () => {
     const env = makeEnv({
       getApproval: async () =>
         makeRecord({
-          agentId: '<img src=x onerror=alert(1)>',
+          agentId: "<img src=x onerror=alert(1)>",
           actionSummary: '<script>alert("xss")</script>',
         }),
     });

@@ -4,8 +4,7 @@ import worker, { verifyJwt } from "../src/index";
 // --- helpers ---
 
 function toBase64Url(input: string | Uint8Array): string {
-  const bytes =
-    typeof input === "string" ? new TextEncoder().encode(input) : input;
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
   const b64 = btoa(String.fromCharCode(...bytes));
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
@@ -17,14 +16,10 @@ let publicJwk: JsonWebKey;
 const KID = "test-key-1";
 const TEAM_DOMAIN = "testteam.cloudflareaccess.com";
 
-async function makeJwt(opts: {
-  kid?: string;
-  exp?: number;
-  custom?: Record<string, unknown>;
-} = {}): Promise<string> {
-  const header = toBase64Url(
-    JSON.stringify({ alg: "ES256", kid: opts.kid ?? KID, typ: "JWT" }),
-  );
+async function makeJwt(
+  opts: { kid?: string; exp?: number; custom?: Record<string, unknown> } = {},
+): Promise<string> {
+  const header = toBase64Url(JSON.stringify({ alg: "ES256", kid: opts.kid ?? KID, typ: "JWT" }));
   const now = Math.floor(Date.now() / 1000);
   const payload = toBase64Url(
     JSON.stringify({
@@ -45,11 +40,10 @@ async function makeJwt(opts: {
 }
 
 beforeAll(async () => {
-  const kp = (await crypto.subtle.generateKey(
-    { name: "ECDSA", namedCurve: "P-256" },
-    true,
-    ["sign", "verify"],
-  )) as CryptoKeyPair;
+  const kp = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
   privateKey = kp.privateKey;
   publicJwk = (await crypto.subtle.exportKey("jwk", kp.publicKey)) as JsonWebKey;
 });
@@ -61,10 +55,9 @@ describe("verifyJwt — ES256", () => {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/cdn-cgi/access/certs")) {
-        return new Response(
-          JSON.stringify({ keys: [{ ...publicJwk, kid: KID, use: "sig" }] }),
-          { headers: { "Content-Type": "application/json" } },
-        );
+        return new Response(JSON.stringify({ keys: [{ ...publicJwk, kid: KID, use: "sig" }] }), {
+          headers: { "Content-Type": "application/json" },
+        });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -126,6 +119,59 @@ describe("verifyJwt — JWKS fetch errors", () => {
     const result = await verifyJwt(await makeJwt(), "broken.cloudflareaccess.com");
     expect(result).toBeNull();
     vi.unstubAllGlobals();
+  });
+});
+
+describe("POST /mcp — reserved approval.* event types (D7)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/cdn-cgi/access/certs")) {
+        return new Response(JSON.stringify({ keys: [{ ...publicJwk, kid: KID, use: "sig" }] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("record_event refuses approval.* types before the DO is ever touched", async () => {
+    const idFromName = vi.fn();
+    const env = {
+      CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
+      AUDIT_DO: { idFromName, get: vi.fn() },
+    } as never;
+    const req = new Request("https://audit-event.kajaril.com/mcp", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Access-Jwt-Assertion": await makeJwt(),
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: {
+          name: "record_event",
+          arguments: {
+            eventType: "approval.decided",
+            purpose: "fabricated decision",
+            sessionId: "s",
+            input: { decision: "approved" },
+          },
+        },
+      }),
+    });
+    const res = await worker.fetch(req, env, {} as never);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: number; message: string } };
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.message).toContain("reserved");
+    expect(idFromName).not.toHaveBeenCalled();
   });
 });
 

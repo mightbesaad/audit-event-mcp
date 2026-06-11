@@ -83,6 +83,11 @@ export interface Env {
   AUDIT_PAYLOADS?: R2Bucket;
   NOTARY?: Fetcher;
   CF_ACCESS_TEAM_DOMAIN?: string;
+  // Cloudflare ratelimit binding (wrangler.jsonc "unsafe"): 30 approval creations/min per
+  // tenant, gvnr's donor pattern. Optional so Node tests and self-hosters without the
+  // binding run unlimited — absence fails open by design (it protects shared capacity,
+  // not tenant data).
+  APPROVAL_RATE_LIMITER?: RateLimit;
 }
 
 // Env for the go.kajaril.com public worker (wrangler.go.jsonc / src/go.ts).
