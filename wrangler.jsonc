@@ -1,6 +1,10 @@
 {
   "name": "audit-event-mcp",
-  "main": "src/index.ts",
+  // src/main.ts wraps src/index.ts unchanged and adds the ApprovalInternal named entrypoint —
+  // the ONLY surface the public go.kajaril.com worker (wrangler.go.jsonc) can reach, via its
+  // service binding. Named entrypoints have no HTTP route: public human surfaces live on the
+  // separate go worker (decision D1), never as a path bypass on this gated worker.
+  "main": "src/main.ts",
   "compatibility_date": "2026-02-24",
   // Disable the *.workers.dev URL: tenant isolation depends on requests arriving through the
   // CF Access policy bound to the custom domain. A live workers.dev URL bypasses that policy,
