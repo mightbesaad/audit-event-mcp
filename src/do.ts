@@ -1,15 +1,22 @@
 import { uuidv7 } from "uuidv7";
 import {
+  type ActionPayload,
   type ApprovalCreateResult,
   type ApprovalRecord,
   type ApprovalStatus,
-  DEFAULT_APPROVAL_TTL_SECONDS,
   type DecideResult,
+  defaultTtlSeconds,
   generateApprovalId,
   isValidApprovalIdShape,
+  MAX_ACTION_PAYLOAD_CHARS,
   statusOnRead,
 } from "@/lib/approval";
-import { computeChainHash, computeInputHash } from "@/lib/hash";
+import {
+  canonicalJson,
+  computeActionPayloadHash,
+  computeChainHash,
+  computeInputHash,
+} from "@/lib/hash";
 import {
   ApprovalCreateRequestSchema,
   ApprovalDecideRequestSchema,
@@ -21,7 +28,9 @@ import type { DossierResult, Env, RecordResult, VerifyResult } from "@/lib/types
 type ApprovalRow = {
   id: string;
   agent_id: string;
+  session_id: string;
   action_summary: string;
+  action_payload: string | null;
   action_payload_hash: string | null;
   status: string;
   responder_id: string | null;
@@ -72,10 +81,14 @@ CREATE INDEX IF NOT EXISTS idx_created ON audit_events(created_at);
 
 -- 'timeout' is computed on read and never stored (D3); the CHECK keeps it that way.
 -- modifications / policy_ref / escalated_to are reserved for v1.5 verbs (D5) — never repurpose.
+-- session_id ties the approval's chain events to the agent's session (D7); action_payload is
+-- the canonical-JSON render copy of what was hashed (D6). Both added Day 2, pre-first-deploy.
 CREATE TABLE IF NOT EXISTS approvals (
   id                   TEXT PRIMARY KEY,
   agent_id             TEXT NOT NULL,
+  session_id           TEXT NOT NULL,
   action_summary       TEXT NOT NULL,
+  action_payload       TEXT,
   action_payload_hash  TEXT,
   status               TEXT NOT NULL DEFAULT 'pending'
                        CHECK (status IN ('pending','approved','denied')),
@@ -363,7 +376,9 @@ export class AuditDO implements DurableObject {
     return {
       id: row.id,
       agentId: row.agent_id,
+      sessionId: row.session_id,
       actionSummary: row.action_summary,
+      actionPayload: row.action_payload ? (JSON.parse(row.action_payload) as ActionPayload) : null,
       actionPayloadHash: row.action_payload_hash,
       status: statusOnRead(row.status as ApprovalStatus, row.expires_at, Date.now()),
       responderId: row.responder_id,
@@ -380,8 +395,9 @@ export class AuditDO implements DurableObject {
     if (!isValidApprovalIdShape(approvalId)) return null;
     const rows = this.sql
       .exec<ApprovalRow>(
-        `SELECT id, agent_id, action_summary, action_payload_hash, status, responder_id,
-                reason, channels, created_at, expires_at, decided_at, callback_url
+        `SELECT id, agent_id, session_id, action_summary, action_payload, action_payload_hash,
+                status, responder_id, reason, channels, created_at, expires_at, decided_at,
+                callback_url
          FROM approvals WHERE id = ?`,
         approvalId,
       )
@@ -400,22 +416,42 @@ export class AuditDO implements DurableObject {
     }
     const input = parsed.data;
 
+    // Stored and hashed in canonical form (D6): the hash must be re-verifiable from the
+    // payload document alone, and what is rendered must be byte-identical to what was hashed.
+    let actionPayloadCanonical: string | null = null;
+    let actionPayloadHash: string | null = null;
+    if (input.actionPayload !== undefined) {
+      actionPayloadCanonical = canonicalJson(input.actionPayload);
+      if (actionPayloadCanonical.length > MAX_ACTION_PAYLOAD_CHARS) {
+        return Response.json(
+          {
+            error: "Invalid input",
+            detail: `actionPayload exceeds ${MAX_ACTION_PAYLOAD_CHARS} chars in canonical JSON — pass a summary-sized payload; large arguments belong behind your own reference`,
+          },
+          { status: 400 },
+        );
+      }
+      actionPayloadHash = await computeActionPayloadHash(input.actionPayload);
+    }
+
     const id = generateApprovalId();
     const now = Date.now();
-    const ttlSeconds = input.ttlSeconds ?? DEFAULT_APPROVAL_TTL_SECONDS;
+    const channels = input.channels ?? [];
+    const ttlSeconds = input.ttlSeconds ?? defaultTtlSeconds(channels);
     const createdAt = new Date(now).toISOString();
     const expiresAt = new Date(now + ttlSeconds * 1000).toISOString();
-    const channels = input.channels ?? [];
 
     this.sql.exec(
       `INSERT INTO approvals
-         (id, agent_id, action_summary, action_payload_hash, status, channels,
-          created_at, expires_at, callback_url)
-       VALUES (?,?,?,?,'pending',?,?,?,?)`,
+         (id, agent_id, session_id, action_summary, action_payload, action_payload_hash,
+          status, channels, created_at, expires_at, callback_url)
+       VALUES (?,?,?,?,?,?,'pending',?,?,?,?)`,
       id,
       input.agentId,
+      input.sessionId,
       input.actionSummary,
-      input.actionPayloadHash ?? null,
+      actionPayloadCanonical,
+      actionPayloadHash,
       JSON.stringify(channels),
       createdAt,
       expiresAt,
@@ -425,8 +461,12 @@ export class AuditDO implements DurableObject {
     const record: ApprovalRecord = {
       id,
       agentId: input.agentId,
+      sessionId: input.sessionId,
       actionSummary: input.actionSummary,
-      actionPayloadHash: input.actionPayloadHash ?? null,
+      actionPayload: actionPayloadCanonical
+        ? (JSON.parse(actionPayloadCanonical) as ActionPayload)
+        : null,
+      actionPayloadHash,
       status: "pending",
       responderId: null,
       reason: null,

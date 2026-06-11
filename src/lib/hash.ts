@@ -9,6 +9,29 @@ export async function computeInputHash(input: unknown): Promise<string> {
   return sha256Hex(JSON.stringify(input));
 }
 
+// Canonical JSON: object keys sorted recursively, arrays in order, JSON semantics for
+// primitives (undefined object values dropped, NaN/Infinity → null). input_hash keeps plain
+// JSON.stringify (chain format frozen, D7); action_payload_hash needs canonical form because
+// an auditor re-verifies it from the payload *document*, not from our original byte stream —
+// the hash must survive any JSON round-trip that reorders keys (decision D6).
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => canonicalJson(v === undefined ? null : v)).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`);
+  return `{${entries.join(",")}}`;
+}
+
+export async function computeActionPayloadHash(payload: unknown): Promise<string> {
+  return sha256Hex(canonicalJson(payload));
+}
+
 export async function computeChainHash(params: {
   id: string;
   eventType: string;

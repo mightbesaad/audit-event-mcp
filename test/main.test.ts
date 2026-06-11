@@ -43,7 +43,11 @@ describe("ApprovalInternal entrypoint", () => {
 
   async function createInDO(): Promise<ApprovalCreateResult> {
     const res = await do_.fetch(
-      post("/approval/create", { agentId: "agent-test", actionSummary: "Test action" }),
+      post("/approval/create", {
+        agentId: "agent-test",
+        sessionId: "session-test",
+        actionSummary: "Test action",
+      }),
     );
     return (await res.json()) as ApprovalCreateResult;
   }

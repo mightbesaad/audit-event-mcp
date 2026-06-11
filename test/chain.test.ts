@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildMerkleRoot, computeChainHash, computeInputHash } from "../src/lib/hash";
+import {
+  buildMerkleRoot,
+  canonicalJson,
+  computeActionPayloadHash,
+  computeChainHash,
+  computeInputHash,
+} from "../src/lib/hash";
 
 describe("computeInputHash", () => {
   it("returns 64-char lowercase hex string", async () => {
@@ -22,6 +28,36 @@ describe("computeInputHash", () => {
 
   it("handles null and undefined differently from each other", async () => {
     expect(await computeInputHash(null)).not.toBe(await computeInputHash(undefined));
+  });
+});
+
+describe("canonicalJson / computeActionPayloadHash (D6)", () => {
+  it("sorts object keys recursively", () => {
+    expect(canonicalJson({ b: { d: 2, c: 1 }, a: 0 })).toBe('{"a":0,"b":{"c":1,"d":2}}');
+  });
+
+  it("preserves array order", () => {
+    expect(canonicalJson([3, 1, 2])).toBe("[3,1,2]");
+  });
+
+  it("matches JSON semantics for awkward values", () => {
+    expect(canonicalJson({ a: undefined, b: 1 })).toBe('{"b":1}');
+    expect(canonicalJson([undefined, Number.NaN])).toBe("[null,null]");
+    expect(canonicalJson(null)).toBe("null");
+    expect(canonicalJson('é"quote')).toBe(JSON.stringify('é"quote'));
+  });
+
+  it("hash is independent of wire key order", async () => {
+    const a = await computeActionPayloadHash({ tool: "t", args: { x: 1, y: 2 } });
+    const b = await computeActionPayloadHash({ args: { y: 2, x: 1 }, tool: "t" });
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("hash varies by payload content", async () => {
+    const a = await computeActionPayloadHash({ tool: "t", args: { amount: 100 } });
+    const b = await computeActionPayloadHash({ tool: "t", args: { amount: 101 } });
+    expect(a).not.toBe(b);
   });
 });
 

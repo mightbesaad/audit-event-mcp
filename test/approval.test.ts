@@ -8,6 +8,7 @@ const { DatabaseSync: DBSync } = await import("node:sqlite");
 
 const BASE_APPROVAL = {
   agentId: "agent-test",
+  sessionId: "session-test",
   actionSummary: "Send €120 refund to customer #991",
 };
 
@@ -42,10 +43,28 @@ describe("AuditDO approvals", () => {
     expect(body.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("create defaults TTL to 30 minutes", async () => {
+  it("create defaults TTL to 30 minutes with no channels (watching human)", async () => {
     const body = await create();
     const ttlMs = Date.parse(body.record.expiresAt) - Date.parse(body.record.createdAt);
     expect(ttlMs).toBe(30 * 60 * 1000);
+  });
+
+  it("create defaults TTL to 30 minutes when an instant channel is connected (D4)", async () => {
+    const body = await create({ channels: ["telegram", "email"] });
+    const ttlMs = Date.parse(body.record.expiresAt) - Date.parse(body.record.createdAt);
+    expect(ttlMs).toBe(30 * 60 * 1000);
+  });
+
+  it("create defaults TTL to 4 hours when email is the only channel (D4)", async () => {
+    const body = await create({ channels: ["email"] });
+    const ttlMs = Date.parse(body.record.expiresAt) - Date.parse(body.record.createdAt);
+    expect(ttlMs).toBe(4 * 60 * 60 * 1000);
+  });
+
+  it("explicit ttlSeconds beats the per-channel default", async () => {
+    const body = await create({ channels: ["email"], ttlSeconds: 120 });
+    const ttlMs = Date.parse(body.record.expiresAt) - Date.parse(body.record.createdAt);
+    expect(ttlMs).toBe(120 * 1000);
   });
 
   it("create honors explicit ttlSeconds", async () => {
@@ -63,10 +82,44 @@ describe("AuditDO approvals", () => {
     expect(body.record.callbackUrl).toBe("https://agent.example.com/resume");
   });
 
-  it("create stores actionPayloadHash when provided", async () => {
-    const hash = "c".repeat(64);
-    const body = await create({ actionPayloadHash: hash });
-    expect(body.record.actionPayloadHash).toBe(hash);
+  it("create canonicalizes and hashes a structured actionPayload (D6)", async () => {
+    const body = await create({
+      actionPayload: { tool: "stripe.refund", args: { amount: 12000, customer: "cus_991" } },
+    });
+    expect(body.record.actionPayload).toEqual({
+      tool: "stripe.refund",
+      args: { amount: 12000, customer: "cus_991" },
+    });
+    expect(body.record.actionPayloadHash).toMatch(/^[0-9a-f]{64}$/);
+    // hash is over canonical (key-sorted) JSON — key order on the wire must not matter
+    const reordered = await create({
+      actionPayload: { tool: "stripe.refund", args: { customer: "cus_991", amount: 12000 } },
+    });
+    expect(reordered.record.actionPayloadHash).toBe(body.record.actionPayloadHash);
+  });
+
+  it("create stores the canonical payload string in the row", async () => {
+    await create({ actionPayload: { tool: "fs.write", args: { b: 2, a: 1 } } });
+    const row = db.prepare("SELECT action_payload FROM approvals").get() as {
+      action_payload: string;
+    };
+    expect(row.action_payload).toBe('{"args":{"a":1,"b":2},"tool":"fs.write"}');
+  });
+
+  it("create without actionPayload stores null payload and null hash", async () => {
+    const body = await create();
+    expect(body.record.actionPayload).toBeNull();
+    expect(body.record.actionPayloadHash).toBeNull();
+  });
+
+  it("create rejects an oversized actionPayload", async () => {
+    const res = await do_.fetch(
+      post("/approval/create", {
+        ...BASE_APPROVAL,
+        actionPayload: { tool: "bulk.op", args: { blob: "x".repeat(5000) } },
+      }),
+    );
+    expect(res.status).toBe(400);
   });
 
   it("create rejects missing agentId", async () => {
@@ -104,9 +157,36 @@ describe("AuditDO approvals", () => {
     expect(res.status).toBe(400);
   });
 
-  it("create rejects malformed actionPayloadHash", async () => {
+  it("create rejects an actionPayload without a tool name", async () => {
     const res = await do_.fetch(
-      post("/approval/create", { ...BASE_APPROVAL, actionPayloadHash: "not-a-hash" }),
+      post("/approval/create", { ...BASE_APPROVAL, actionPayload: { args: { a: 1 } } }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("create rejects extra keys in actionPayload (witnessed artifact is exactly {tool, args})", async () => {
+    const res = await do_.fetch(
+      post("/approval/create", {
+        ...BASE_APPROVAL,
+        actionPayload: { tool: "fs.write", args: {}, hidden: "never rendered" },
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("create rejects a caller-supplied hash (hash is always computed server-side)", async () => {
+    const res = await do_.fetch(
+      post("/approval/create", { ...BASE_APPROVAL, actionPayloadHash: "c".repeat(64) }),
+    );
+    // unknown key is simply ignored by the non-strict create schema, but it must never land
+    const body = (await res.json()) as ApprovalCreateResult;
+    expect(res.status).toBe(200);
+    expect(body.record.actionPayloadHash).toBeNull();
+  });
+
+  it("create rejects missing sessionId", async () => {
+    const res = await do_.fetch(
+      post("/approval/create", { agentId: "agent-test", actionSummary: "x" }),
     );
     expect(res.status).toBe(400);
   });

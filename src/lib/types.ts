@@ -1,3 +1,5 @@
+// approval.* types are emitted by the worker layer only (D7); the public record_event
+// surface rejects them. Reserved for v1.5: "approval.deferred", "approval.escalated".
 export type EventType =
   | "tool.call"
   | "tool.result"
@@ -5,7 +7,9 @@ export type EventType =
   | "human.turn"
   | "memory.read"
   | "memory.write"
-  | "error.raised";
+  | "error.raised"
+  | "approval.requested"
+  | "approval.decided";
 
 export type LawfulBasis =
   | "legitimate_interest"

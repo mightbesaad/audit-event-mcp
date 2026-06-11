@@ -17,7 +17,9 @@ function makeRecord(overrides: Partial<ApprovalRecord> = {}): ApprovalRecord {
   return {
     id: APPROVAL_ID,
     agentId: "agent-test",
+    sessionId: "session-test",
     actionSummary: "Send €120 refund to customer #991",
+    actionPayload: null,
     actionPayloadHash: null,
     status: "pending",
     responderId: null,
