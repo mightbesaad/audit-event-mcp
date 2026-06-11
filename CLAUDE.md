@@ -94,6 +94,7 @@ Do not read or write outside the repo root without an explicit ask.
 | Milestone | Status | Notes |
 |---|---|---|
 | Scaffolding + hash chain (M8 foundation) | _in progress_ | 2026-05-15 |
+| Witness Day 1: approvals in AuditDO, HMAC link tokens, go.kajaril.com worker + approve page | done | 2026-06-11 — see kajaril-witness-integration-draft.md §3; not yet deployed |
 
 Update this table as milestones close.
 
