@@ -80,3 +80,11 @@ export interface Env {
   NOTARY?: Fetcher;
   CF_ACCESS_TEAM_DOMAIN?: string;
 }
+
+// Env for the go.kajaril.com public worker (wrangler.go.jsonc / src/go.ts).
+// AUDIT is the service binding to the ApprovalInternal entrypoint in src/main.ts —
+// typed structurally so tests can substitute a plain mock.
+export interface GoEnv {
+  AUDIT: import("@/lib/approval").ApprovalInternalClient;
+  APPROVAL_TOKEN_SECRET?: string;
+}

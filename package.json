@@ -23,7 +23,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:go": "wrangler dev --config wrangler.go.jsonc --config wrangler.jsonc",
     "deploy": "wrangler deploy",
+    "deploy:go": "wrangler deploy --config wrangler.go.jsonc",
     "deploy:notary": "wrangler deploy --config wrangler.notary.jsonc",
     "test": "vitest run",
     "test:watch": "vitest",

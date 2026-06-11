@@ -1,0 +1,29 @@
+{
+  // go.kajaril.com — the public human-surface worker (decision D1). This worker is
+  // INTENTIONALLY reachable without CF Access: approvers open links from a phone with no
+  // Access token. It must never gain a tenant-selecting input other than the HMAC-signed
+  // link token (src/lib/token.ts), and it reaches tenant data only through the AUDIT
+  // service binding below — never public HTTP, never a DO binding of its own.
+  "name": "go-kajaril",
+  "main": "src/go.ts",
+  "compatibility_date": "2026-02-24",
+  // Single hostname, same reasoning as the gated worker: the only host is go.kajaril.com.
+  "workers_dev": false,
+  // account_id omitted — Wrangler infers from auth context. Never commit it to this public repo.
+  "services": [
+    {
+      "binding": "AUDIT",
+      "service": "audit-event-mcp",
+      // Named entrypoint (src/main.ts): get/decide on approvals only. The gated worker's
+      // public route table is untouched — this is not an HTTP path that could be probed.
+      "entrypoint": "ApprovalInternal"
+    }
+  ],
+  // Secrets (wrangler secret put --config wrangler.go.jsonc):
+  //   APPROVAL_TOKEN_SECRET — HMAC key for approval link tokens. The worker fails closed
+  //   (503) when unset. High-entropy random string; rotation invalidates outstanding links.
+  "observability": {
+    "enabled": true
+  },
+  "routes": [{ "pattern": "go.kajaril.com", "custom_domain": true }]
+}

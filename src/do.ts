@@ -1,7 +1,37 @@
 import { uuidv7 } from "uuidv7";
+import {
+  type ApprovalCreateResult,
+  type ApprovalRecord,
+  type ApprovalStatus,
+  DEFAULT_APPROVAL_TTL_SECONDS,
+  type DecideResult,
+  generateApprovalId,
+  isValidApprovalIdShape,
+  statusOnRead,
+} from "@/lib/approval";
 import { computeChainHash, computeInputHash } from "@/lib/hash";
-import { DoRecordRequestSchema } from "@/lib/schema";
+import {
+  ApprovalCreateRequestSchema,
+  ApprovalDecideRequestSchema,
+  DoRecordRequestSchema,
+} from "@/lib/schema";
 import type { DossierResult, Env, RecordResult, VerifyResult } from "@/lib/types";
+
+// type alias, not interface — SqlStorage.exec<T> needs the implicit index signature
+type ApprovalRow = {
+  id: string;
+  agent_id: string;
+  action_summary: string;
+  action_payload_hash: string | null;
+  status: string;
+  responder_id: string | null;
+  reason: string | null;
+  channels: string;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  callback_url: string | null;
+};
 
 // Unguessable capability token for the unauthenticated dossier download URL. Uses 256 bits of
 // CSPRNG output rather than uuidv7: a dossier link is a bearer capability to a data subject's
@@ -39,6 +69,28 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_session ON audit_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_agent   ON audit_events(agent_id);
 CREATE INDEX IF NOT EXISTS idx_created ON audit_events(created_at);
+
+-- 'timeout' is computed on read and never stored (D3); the CHECK keeps it that way.
+-- modifications / policy_ref / escalated_to are reserved for v1.5 verbs (D5) — never repurpose.
+CREATE TABLE IF NOT EXISTS approvals (
+  id                   TEXT PRIMARY KEY,
+  agent_id             TEXT NOT NULL,
+  action_summary       TEXT NOT NULL,
+  action_payload_hash  TEXT,
+  status               TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending','approved','denied')),
+  responder_id         TEXT,
+  reason               TEXT,
+  channels             TEXT NOT NULL DEFAULT '[]',
+  created_at           TEXT NOT NULL,
+  expires_at           TEXT NOT NULL,
+  decided_at           TEXT,
+  callback_url         TEXT,
+  modifications        TEXT,
+  policy_ref           TEXT,
+  escalated_to         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
 `;
 
 export class AuditDO implements DurableObject {
@@ -60,6 +112,12 @@ export class AuditDO implements DurableObject {
     if (request.method === "POST" && url.pathname === "/query") return this.handleQuery(request);
     if (request.method === "POST" && url.pathname === "/dossier")
       return this.handleDossier(request);
+    if (request.method === "POST" && url.pathname === "/approval/create")
+      return this.handleApprovalCreate(request);
+    if (request.method === "POST" && url.pathname === "/approval/get")
+      return this.handleApprovalGet(request);
+    if (request.method === "POST" && url.pathname === "/approval/decide")
+      return this.handleApprovalDecide(request);
     return Response.json({ error: "Not Found" }, { status: 404 });
   }
 
@@ -293,6 +351,158 @@ export class AuditDO implements DurableObject {
     } catch {
       // Notary unavailable — events remain pending for next alarm cycle
     }
+  }
+
+  // --- approvals (decision D3) ---
+  // State machine ported from gvnr lib/approval.ts: pending → approved | denied via /decide;
+  // 'timeout' is computed on read the moment expires_at passes — no alarms, nothing stored.
+  // Chain events (approval.requested / approval.decided) ride the existing /record path and
+  // are emitted by the Worker layer, not here — the chain format stays frozen (D7).
+
+  private approvalRowToRecord(row: ApprovalRow): ApprovalRecord {
+    return {
+      id: row.id,
+      agentId: row.agent_id,
+      actionSummary: row.action_summary,
+      actionPayloadHash: row.action_payload_hash,
+      status: statusOnRead(row.status as ApprovalStatus, row.expires_at, Date.now()),
+      responderId: row.responder_id,
+      reason: row.reason,
+      channels: JSON.parse(row.channels) as string[],
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      decidedAt: row.decided_at,
+      callbackUrl: row.callback_url,
+    };
+  }
+
+  private readApprovalRow(approvalId: string): ApprovalRow | null {
+    if (!isValidApprovalIdShape(approvalId)) return null;
+    const rows = this.sql
+      .exec<ApprovalRow>(
+        `SELECT id, agent_id, action_summary, action_payload_hash, status, responder_id,
+                reason, channels, created_at, expires_at, decided_at, callback_url
+         FROM approvals WHERE id = ?`,
+        approvalId,
+      )
+      .toArray();
+    return rows[0] ?? null;
+  }
+
+  private async handleApprovalCreate(request: Request): Promise<Response> {
+    const raw = await request.json();
+    const parsed = ApprovalCreateRequestSchema.safeParse(raw);
+    if (!parsed.success) {
+      return Response.json(
+        { error: "Invalid input", issues: parsed.error.issues },
+        { status: 400 },
+      );
+    }
+    const input = parsed.data;
+
+    const id = generateApprovalId();
+    const now = Date.now();
+    const ttlSeconds = input.ttlSeconds ?? DEFAULT_APPROVAL_TTL_SECONDS;
+    const createdAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + ttlSeconds * 1000).toISOString();
+    const channels = input.channels ?? [];
+
+    this.sql.exec(
+      `INSERT INTO approvals
+         (id, agent_id, action_summary, action_payload_hash, status, channels,
+          created_at, expires_at, callback_url)
+       VALUES (?,?,?,?,'pending',?,?,?,?)`,
+      id,
+      input.agentId,
+      input.actionSummary,
+      input.actionPayloadHash ?? null,
+      JSON.stringify(channels),
+      createdAt,
+      expiresAt,
+      input.callbackUrl ?? null,
+    );
+
+    const record: ApprovalRecord = {
+      id,
+      agentId: input.agentId,
+      actionSummary: input.actionSummary,
+      actionPayloadHash: input.actionPayloadHash ?? null,
+      status: "pending",
+      responderId: null,
+      reason: null,
+      channels,
+      createdAt,
+      expiresAt,
+      decidedAt: null,
+      callbackUrl: input.callbackUrl ?? null,
+    };
+    const result: ApprovalCreateResult = { approvalId: id, expiresAt, record };
+    return Response.json(result);
+  }
+
+  private async handleApprovalGet(request: Request): Promise<Response> {
+    const raw = (await request.json()) as { approvalId?: string };
+    if (typeof raw.approvalId !== "string") {
+      return Response.json({ error: "approvalId required" }, { status: 400 });
+    }
+    const row = this.readApprovalRow(raw.approvalId);
+    if (!row) return Response.json({ error: "approval_not_found" }, { status: 404 });
+    return Response.json(this.approvalRowToRecord(row));
+  }
+
+  private async handleApprovalDecide(request: Request): Promise<Response> {
+    const raw = await request.json();
+    const parsed = ApprovalDecideRequestSchema.safeParse(raw);
+    if (!parsed.success) {
+      return Response.json(
+        { error: "Invalid input", issues: parsed.error.issues },
+        { status: 400 },
+      );
+    }
+    const input = parsed.data;
+
+    const row = this.readApprovalRow(input.approvalId);
+    if (!row) {
+      const result: DecideResult = { ok: false, reason: "not_found" };
+      return Response.json(result, { status: 404 });
+    }
+    if (row.status !== "pending") {
+      const result: DecideResult = {
+        ok: false,
+        reason: "already_decided",
+        record: this.approvalRowToRecord(row),
+      };
+      return Response.json(result, { status: 409 });
+    }
+    if (Date.now() > Date.parse(row.expires_at)) {
+      const result: DecideResult = {
+        ok: false,
+        reason: "expired",
+        record: this.approvalRowToRecord(row),
+      };
+      return Response.json(result, { status: 410 });
+    }
+
+    const decidedAt = new Date().toISOString();
+    this.sql.exec(
+      `UPDATE approvals
+       SET status = ?, responder_id = ?, reason = ?, decided_at = ?
+       WHERE id = ? AND status = 'pending'`,
+      input.decision,
+      input.responderId ?? null,
+      input.reason ?? null,
+      decidedAt,
+      input.approvalId,
+    );
+
+    const updated = this.readApprovalRow(input.approvalId);
+    if (!updated) {
+      return Response.json({ ok: false, reason: "not_found" } satisfies DecideResult, {
+        status: 404,
+      });
+    }
+    const result: DecideResult = { ok: true, record: this.approvalRowToRecord(updated) };
+    return Response.json(result);
   }
 
   private async handleDossier(request: Request): Promise<Response> {
