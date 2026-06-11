@@ -59,6 +59,12 @@
       }
     ]
   },
+  // Secrets (wrangler secret put):
+  //   WEBHOOK_SIGNING_SECRET — master for per-tenant decision-webhook signing keys (D9,
+  //   HKDF-derived per clientId). High-entropy random string. Unset → webhooks are not
+  //   sent (fail closed, never unsigned) and request_approval returns webhookSecret: null.
+  //   Rotation rotates every tenant's secret at once; customers re-read it from the next
+  //   request_approval response.
   "observability": {
     "enabled": true
   },

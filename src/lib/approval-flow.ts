@@ -1,6 +1,7 @@
-import type { ApprovalCreateResult } from "@/lib/approval";
+import type { ApprovalCreateResult, ApprovalRecord } from "@/lib/approval";
 import { isValidClientIdShape } from "@/lib/approval";
 import type { Env, RecordResult } from "@/lib/types";
+import { deriveWebhookSecret } from "@/lib/webhook";
 
 // Worker-layer request_approval flow (Day 3 wires the MCP tool / REST route to this).
 // Shape kept from gvnr src/routes/approval.ts (donor): REST-first {status, body} results
@@ -107,6 +108,55 @@ export async function requestApproval(
       expiresAt: created.expiresAt,
       actionPayloadHash: record.actionPayloadHash,
       chainEvent,
+      // D9 distribution channel: the per-tenant webhook verification secret travels in
+      // every response so v1 needs no dashboard. Null when the master secret is unbound —
+      // in that case decision webhooks are not sent at all (fail closed, never unsigned).
+      webhookSecret: env.WEBHOOK_SIGNING_SECRET
+        ? await deriveWebhookSecret(env.WEBHOOK_SIGNING_SECRET, clientId)
+        : null,
     },
   };
+}
+
+const DECIDED_PURPOSE = "human oversight — approval decided (AI Act Art. 14)";
+
+// Emits the approval.decided chain event after a successful decide. The decision is already
+// committed in the approvals table by then, so a /record failure is logged loudly and
+// reported as null rather than thrown — the human's decision must not appear to fail.
+// A retrying outbox is v1.5 (DEFERRED.md).
+export async function witnessDecision(
+  env: Env,
+  clientId: string,
+  record: ApprovalRecord,
+): Promise<RecordResult | null> {
+  try {
+    const res = await tenantStub(env, clientId).fetch("https://do-internal/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId: record.agentId,
+        sessionId: record.sessionId,
+        eventType: "approval.decided",
+        purpose: DECIDED_PURPOSE,
+        input: {
+          approvalId: record.id,
+          decision: record.status,
+          reason: record.reason,
+          responderId: record.responderId,
+          actionPayloadHash: record.actionPayloadHash,
+          decidedAt: record.decidedAt,
+        },
+      }),
+    });
+    if (!res.ok) {
+      console.error(`approval.decided chain event refused for ${record.id}: ${res.status}`);
+      return null;
+    }
+    return (await res.json()) as RecordResult;
+  } catch (e) {
+    console.error(
+      `approval.decided chain event failed for ${record.id}: ${e instanceof Error ? e.message : e}`,
+    );
+    return null;
+  }
 }

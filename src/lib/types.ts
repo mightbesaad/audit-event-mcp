@@ -88,6 +88,10 @@ export interface Env {
   // binding run unlimited — absence fails open by design (it protects shared capacity,
   // not tenant data).
   APPROVAL_RATE_LIMITER?: RateLimit;
+  // Master for per-tenant webhook signing secrets (D9), a Workers Secret. Unset → decision
+  // webhooks are not sent and request_approval returns webhookSecret: null. Fail closed:
+  // an unsigned webhook is forgeable and never leaves the worker.
+  WEBHOOK_SIGNING_SECRET?: string;
 }
 
 // Env for the go.kajaril.com public worker (wrangler.go.jsonc / src/go.ts).

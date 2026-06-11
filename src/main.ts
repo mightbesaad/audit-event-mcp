@@ -8,8 +8,9 @@ import {
   isValidApprovalIdShape,
   isValidClientIdShape,
 } from "@/lib/approval";
-import { tenantStub } from "@/lib/approval-flow";
+import { tenantStub, witnessDecision } from "@/lib/approval-flow";
 import type { Env } from "@/lib/types";
+import { sendDecisionWebhook } from "@/lib/webhook";
 
 export { AuditDO } from "@/do";
 
@@ -70,6 +71,47 @@ export class ApprovalInternal extends WorkerEntrypoint<Env> implements ApprovalI
     // DecideResult body; HTTP status is transport detail here. A 400 means the body is a
     // validation error, not a DecideResult — collapse it to not_found.
     if (res.status === 400) return { ok: false, reason: "not_found" };
-    return (await res.json()) as DecideResult;
+    const result = (await res.json()) as DecideResult;
+
+    if (result.ok && result.record) {
+      const record = result.record;
+      // Witnessed synchronously — the chain event is the evidence; the webhook below is
+      // only the resume accelerator and runs after the response via waitUntil (D4/D7).
+      const chainEvent = await witnessDecision(this.env, params.clientId, record);
+
+      if (record.callbackUrl) {
+        if (this.env.WEBHOOK_SIGNING_SECRET) {
+          this.ctx.waitUntil(
+            sendDecisionWebhook({
+              master: this.env.WEBHOOK_SIGNING_SECRET,
+              clientId: params.clientId,
+              callbackUrl: record.callbackUrl,
+              body: {
+                type: "approval.decided",
+                approval: {
+                  id: record.id,
+                  agentId: record.agentId,
+                  sessionId: record.sessionId,
+                  status: record.status as "approved" | "denied",
+                  reason: record.reason,
+                  responderId: record.responderId,
+                  actionSummary: record.actionSummary,
+                  actionPayloadHash: record.actionPayloadHash,
+                  createdAt: record.createdAt,
+                  decidedAt: record.decidedAt,
+                  expiresAt: record.expiresAt,
+                },
+                chainEvent,
+              },
+            }),
+          );
+        } else {
+          // Fail closed (D9): an unsigned webhook is forgeable, so none is sent. Polling
+          // still resolves the approval; this log is the operator's cue to bind the secret.
+          console.error("decision webhook skipped: WEBHOOK_SIGNING_SECRET unset");
+        }
+      }
+    }
+    return result;
   }
 }
