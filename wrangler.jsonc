@@ -8,6 +8,12 @@
   "workers_dev": false,
   // account_id omitted — Wrangler infers from auth context.
   // Never commit account_id to this public repo.
+  // Cloudflare Access team domain — the Worker fetches its JWKS from
+  // https://<this>/cdn-cgi/access/certs to verify the CF-Access-Jwt-Assertion on /mcp.
+  // With it unset, /mcp fails closed (503) instead of trusting an unverified token.
+  "vars": {
+    "CF_ACCESS_TEAM_DOMAIN": "aged-limit-247a.cloudflareaccess.com"
+  },
   // DO namespace created implicitly on first `wrangler deploy` — no separate CLI command needed.
   "durable_objects": {
     "bindings": [
