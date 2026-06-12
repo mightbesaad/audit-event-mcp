@@ -106,8 +106,59 @@ The notary public key is published at `/.well-known/notary-pubkey`. Any auditor 
 
 ```
 tool.call | tool.result | decision.made |
-human.turn | memory.read | memory.write | error.raised
+human.turn | memory.read | memory.write | error.raised |
+approval.requested | approval.decided
 ```
+
+`approval.*` types are reserved: the witness records them itself when a human approval is
+requested and decided. `record_event` refuses them — an agent must never be able to fabricate
+human-decision evidence. (`approval.deferred` and `approval.escalated` are reserved for later.)
+
+## Decision webhooks
+
+When an approval carries a `callback_url`, the decision (approve/deny) is POSTed to it the
+moment a human decides — this is what lets an interrupted agent resume instead of poll.
+Timeouts never fire a webhook; polling resolves those.
+
+Every delivery is signed. The body is JSON:
+
+```json
+{
+  "type": "approval.decided",
+  "approval": { "id": "…", "status": "approved", "reason": null, "responderId": "…",
+                "agentId": "…", "sessionId": "…", "actionSummary": "…",
+                "actionPayloadHash": "…", "createdAt": "…", "decidedAt": "…", "expiresAt": "…" },
+  "chainEvent": { "id": "…", "chainHash": "…" }
+}
+```
+
+`chainEvent` points at the `approval.decided` entry in the hash chain — cite it as evidence.
+
+**Verifying the signature.** Your webhook secret (`whsec_…`) is returned in every
+`request_approval` response as `webhookSecret` — no dashboard needed. Each delivery carries:
+
+```
+X-Kajaril-Signature: t=<unix seconds>,v1=<hex>
+```
+
+To verify:
+
+1. Read `t` and `v1` from the header. Reject if `|now − t|` exceeds 300 seconds.
+2. Compute `HMAC-SHA256(key = the literal secret string (UTF-8, whsec_ prefix included),
+   message = "{t}." + raw request body)`.
+3. Hex-encode and compare to `v1` with a constant-time comparison.
+
+```js
+const expected = crypto.createHmac("sha256", secret).update(`${t}.${rawBody}`).digest("hex");
+const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1));
+```
+
+The reference implementation is `verifyWebhookSignature` in `src/lib/webhook.ts` — the same
+code path our tests run.
+
+Self-hosting note: webhook signing derives per-tenant secrets from the `WEBHOOK_SIGNING_SECRET`
+Workers Secret. If it is unset, webhooks are not sent at all (never unsigned) and
+`request_approval` returns `webhookSecret: null`; polling still works.
 
 ## Lawful basis (GDPR Art. 6)
 

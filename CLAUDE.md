@@ -95,6 +95,7 @@ Do not read or write outside the repo root without an explicit ask.
 |---|---|---|
 | Scaffolding + hash chain (M8 foundation) | _in progress_ | 2026-05-15 |
 | Witness Day 1: approvals in AuditDO, HMAC link tokens, go.kajaril.com worker + approve page | done | 2026-06-11 — see kajaril-witness-integration-draft.md §3; not yet deployed |
+| Witness Day 2: approval.requested/decided chain events, action-payload hashing (D6), signed decision webhook (D9), per-channel TTL, rate limiter | done | 2026-06-12 — webhook-secret design recorded as D9 in the draft; not yet deployed |
 
 Update this table as milestones close.
 
