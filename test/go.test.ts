@@ -17,7 +17,9 @@ function makeRecord(overrides: Partial<ApprovalRecord> = {}): ApprovalRecord {
   return {
     id: APPROVAL_ID,
     agentId: "agent-test",
+    sessionId: "session-test",
     actionSummary: "Send €120 refund to customer #991",
+    actionPayload: null,
     actionPayloadHash: null,
     status: "pending",
     responderId: null,
@@ -102,7 +104,7 @@ describe("go worker — approve page", () => {
     const env = makeEnv({
       getApproval: async () =>
         makeRecord({
-          agentId: '<img src=x onerror=alert(1)>',
+          agentId: "<img src=x onerror=alert(1)>",
           actionSummary: '<script>alert("xss")</script>',
         }),
     });
@@ -118,6 +120,34 @@ describe("go worker — approve page", () => {
     const env = makeEnv({ getApproval: async () => makeRecord({ actionPayloadHash: hash }) });
     const res = await worker.fetch(get(`/a/${await token()}`), env, ctx);
     expect(await res.text()).toContain(hash);
+  });
+
+  it("shows the structured payload — tool and args — alongside the summary (D6)", async () => {
+    const env = makeEnv({
+      getApproval: async () =>
+        makeRecord({
+          actionPayload: { tool: "stripe.refund", args: { amount: 12000, customer: "cus_991" } },
+          actionPayloadHash: "d".repeat(64),
+        }),
+    });
+    const res = await worker.fetch(get(`/a/${await token()}`), env, ctx);
+    const html = await res.text();
+    expect(html).toContain("stripe.refund");
+    expect(html).toContain("cus_991");
+    expect(html).toContain("Send €120 refund to customer #991");
+  });
+
+  it("escapes HTML inside payload args", async () => {
+    const env = makeEnv({
+      getApproval: async () =>
+        makeRecord({
+          actionPayload: { tool: "<script>alert(1)</script>", args: { x: "<img src=x>" } },
+        }),
+    });
+    const res = await worker.fetch(get(`/a/${await token()}`), env, ctx);
+    const html = await res.text();
+    expect(html.toLowerCase()).not.toContain("<script");
+    expect(html).not.toContain("<img src=x");
   });
 
   it("returns 404 not-found page for a garbage token without calling the binding", async () => {

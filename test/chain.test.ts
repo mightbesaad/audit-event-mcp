@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildMerkleRoot, computeChainHash, computeInputHash } from "../src/lib/hash";
+import {
+  buildMerkleRoot,
+  canonicalJson,
+  computeActionPayloadHash,
+  computeChainHash,
+  computeInputHash,
+} from "../src/lib/hash";
 
 describe("computeInputHash", () => {
   it("returns 64-char lowercase hex string", async () => {
@@ -22,6 +28,36 @@ describe("computeInputHash", () => {
 
   it("handles null and undefined differently from each other", async () => {
     expect(await computeInputHash(null)).not.toBe(await computeInputHash(undefined));
+  });
+});
+
+describe("canonicalJson / computeActionPayloadHash (D6)", () => {
+  it("sorts object keys recursively", () => {
+    expect(canonicalJson({ b: { d: 2, c: 1 }, a: 0 })).toBe('{"a":0,"b":{"c":1,"d":2}}');
+  });
+
+  it("preserves array order", () => {
+    expect(canonicalJson([3, 1, 2])).toBe("[3,1,2]");
+  });
+
+  it("matches JSON semantics for awkward values", () => {
+    expect(canonicalJson({ a: undefined, b: 1 })).toBe('{"b":1}');
+    expect(canonicalJson([undefined, Number.NaN])).toBe("[null,null]");
+    expect(canonicalJson(null)).toBe("null");
+    expect(canonicalJson('é"quote')).toBe(JSON.stringify('é"quote'));
+  });
+
+  it("hash is independent of wire key order", async () => {
+    const a = await computeActionPayloadHash({ tool: "t", args: { x: 1, y: 2 } });
+    const b = await computeActionPayloadHash({ args: { y: 2, x: 1 }, tool: "t" });
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("hash varies by payload content", async () => {
+    const a = await computeActionPayloadHash({ tool: "t", args: { amount: 100 } });
+    const b = await computeActionPayloadHash({ tool: "t", args: { amount: 101 } });
+    expect(a).not.toBe(b);
   });
 });
 
@@ -138,27 +174,62 @@ describe("buildMerkleRoot", () => {
 describe("chain integrity across a sequence of events", () => {
   it("3-event chain: each hash depends on the previous", async () => {
     const slot0 = await computeInputHash({ step: 0 });
-    const chain0 = await computeChainHash({ id: "id0", eventType: "tool.call", inputHashSlot: slot0, prevHash: null });
+    const chain0 = await computeChainHash({
+      id: "id0",
+      eventType: "tool.call",
+      inputHashSlot: slot0,
+      prevHash: null,
+    });
 
     const slot1 = await computeInputHash({ step: 1 });
-    const chain1 = await computeChainHash({ id: "id1", eventType: "tool.result", inputHashSlot: slot1, prevHash: chain0 });
+    const chain1 = await computeChainHash({
+      id: "id1",
+      eventType: "tool.result",
+      inputHashSlot: slot1,
+      prevHash: chain0,
+    });
 
     const slot2 = await computeInputHash({ step: 2 });
-    const chain2 = await computeChainHash({ id: "id2", eventType: "decision.made", inputHashSlot: slot2, prevHash: chain1 });
+    const chain2 = await computeChainHash({
+      id: "id2",
+      eventType: "decision.made",
+      inputHashSlot: slot2,
+      prevHash: chain1,
+    });
 
     expect(new Set([chain0, chain1, chain2]).size).toBe(3);
   });
 
   it("tampering event 0 cascades through the chain", async () => {
     const slot0 = await computeInputHash({ step: 0 });
-    const chain0 = await computeChainHash({ id: "id0", eventType: "tool.call", inputHashSlot: slot0, prevHash: null });
+    const chain0 = await computeChainHash({
+      id: "id0",
+      eventType: "tool.call",
+      inputHashSlot: slot0,
+      prevHash: null,
+    });
 
     const slot1 = await computeInputHash({ step: 1 });
-    const chain1 = await computeChainHash({ id: "id1", eventType: "tool.result", inputHashSlot: slot1, prevHash: chain0 });
+    const chain1 = await computeChainHash({
+      id: "id1",
+      eventType: "tool.result",
+      inputHashSlot: slot1,
+      prevHash: chain0,
+    });
 
     const tamperedSlot0 = await computeInputHash({ step: "TAMPERED" });
-    const tamperedChain0 = await computeChainHash({ id: "id0", eventType: "tool.call", inputHashSlot: tamperedSlot0, prevHash: null });
-    const tamperedChain1 = await computeChainHash({ id: "id1", eventType: "tool.result", inputHashSlot: slot1, prevHash: tamperedChain0 });
+    const tamperedChain0 = await computeChainHash({
+      id: "id0",
+      eventType: "tool.call",
+      inputHashSlot: tamperedSlot0,
+      prevHash: null,
+    });
+    const tamperedChain1 = await computeChainHash({
+      id: "id1",
+      eventType: "tool.result",
+      inputHashSlot: slot1,
+      prevHash: tamperedChain0,
+    });
 
     expect(tamperedChain0).not.toBe(chain0);
     expect(tamperedChain1).not.toBe(chain1);
@@ -166,14 +237,29 @@ describe("chain integrity across a sequence of events", () => {
 
   it("mixed-omission chain: omitted-reason slot preserves chain integrity", async () => {
     const inputHash = await computeInputHash({ data: "sensitive" });
-    const chain0 = await computeChainHash({ id: "id0", eventType: "human.turn", inputHashSlot: inputHash, prevHash: null });
+    const chain0 = await computeChainHash({
+      id: "id0",
+      eventType: "human.turn",
+      inputHashSlot: inputHash,
+      prevHash: null,
+    });
 
     // Second event: caller omitted input
-    const chain1 = await computeChainHash({ id: "id1", eventType: "tool.call", inputHashSlot: "no_personal_data", prevHash: chain0 });
+    const chain1 = await computeChainHash({
+      id: "id1",
+      eventType: "tool.call",
+      inputHashSlot: "no_personal_data",
+      prevHash: chain0,
+    });
 
     // Third event: real input again
     const slot2 = await computeInputHash({ result: "ok" });
-    const chain2 = await computeChainHash({ id: "id2", eventType: "tool.result", inputHashSlot: slot2, prevHash: chain1 });
+    const chain2 = await computeChainHash({
+      id: "id2",
+      eventType: "tool.result",
+      inputHashSlot: slot2,
+      prevHash: chain1,
+    });
 
     expect(new Set([chain0, chain1, chain2]).size).toBe(3);
   });

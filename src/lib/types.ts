@@ -1,3 +1,5 @@
+// approval.* types are emitted by the worker layer only (D7); the public record_event
+// surface rejects them. Reserved for v1.5: "approval.deferred", "approval.escalated".
 export type EventType =
   | "tool.call"
   | "tool.result"
@@ -5,7 +7,9 @@ export type EventType =
   | "human.turn"
   | "memory.read"
   | "memory.write"
-  | "error.raised";
+  | "error.raised"
+  | "approval.requested"
+  | "approval.decided";
 
 export type LawfulBasis =
   | "legitimate_interest"
@@ -79,6 +83,15 @@ export interface Env {
   AUDIT_PAYLOADS?: R2Bucket;
   NOTARY?: Fetcher;
   CF_ACCESS_TEAM_DOMAIN?: string;
+  // Cloudflare ratelimit binding (wrangler.jsonc "unsafe"): 30 approval creations/min per
+  // tenant, gvnr's donor pattern. Optional so Node tests and self-hosters without the
+  // binding run unlimited — absence fails open by design (it protects shared capacity,
+  // not tenant data).
+  APPROVAL_RATE_LIMITER?: RateLimit;
+  // Master for per-tenant webhook signing secrets (D9), a Workers Secret. Unset → decision
+  // webhooks are not sent and request_approval returns webhookSecret: null. Fail closed:
+  // an unsigned webhook is forgeable and never leaves the worker.
+  WEBHOOK_SIGNING_SECRET?: string;
 }
 
 // Env for the go.kajaril.com public worker (wrangler.go.jsonc / src/go.ts).

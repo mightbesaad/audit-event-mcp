@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuditDO } from "@/do";
 import type { DossierResult, RecordResult, VerifyResult } from "@/lib/types";
 import { fakeEnv, makeMockNotary, makeMockR2, makeState, post } from "./harness";
@@ -83,9 +83,9 @@ describe("AuditDO", () => {
     ).json()) as RecordResult;
 
     // Confirm chain wiring by inspecting stored prev_hash directly via node:sqlite
-    const row = db
-      .prepare("SELECT prev_hash FROM audit_events WHERE id = ?")
-      .get(r2.id) as { prev_hash: string } | undefined;
+    const row = db.prepare("SELECT prev_hash FROM audit_events WHERE id = ?").get(r2.id) as
+      | { prev_hash: string }
+      | undefined;
 
     expect(row?.prev_hash).toBe(r1.chainHash);
   });
@@ -95,9 +95,9 @@ describe("AuditDO", () => {
       await do_.fetch(post("/record", { ...BASE_EVENT, input: { step: 1 } }))
     ).json()) as RecordResult;
 
-    const row = db
-      .prepare("SELECT prev_hash FROM audit_events WHERE id = ?")
-      .get(r1.id) as { prev_hash: string | null } | undefined;
+    const row = db.prepare("SELECT prev_hash FROM audit_events WHERE id = ?").get(r1.id) as
+      | { prev_hash: string | null }
+      | undefined;
 
     expect(row?.prev_hash).toBeNull();
   });
@@ -117,9 +117,7 @@ describe("AuditDO", () => {
   it("verify detects a tampered chain_hash", async () => {
     await do_.fetch(post("/record", { ...BASE_EVENT, input: { x: 1 } }));
     // Tamper with the stored chain_hash directly via node:sqlite
-    db.prepare(
-      "UPDATE audit_events SET chain_hash = 'deadbeef' || substr(chain_hash, 9)",
-    ).run();
+    db.prepare("UPDATE audit_events SET chain_hash = 'deadbeef' || substr(chain_hash, 9)").run();
 
     const res = await do_.fetch(post("/verify", {}));
     const body = (await res.json()) as VerifyResult;
@@ -220,17 +218,15 @@ describe("AuditDO", () => {
       v: unknown,
       o?: unknown,
     ) => unknown;
-    (r2 as unknown as Record<string, unknown>).put = async (
-      k: string,
-      v: unknown,
-      o?: unknown,
-    ) => {
+    (r2 as unknown as Record<string, unknown>).put = async (k: string, v: unknown, o?: unknown) => {
       capturedBody = String(v);
       return origPut(k, v, o);
     };
 
     const doR2 = new AuditDO(makeState(db), { ...fakeEnv, AUDIT_PAYLOADS: r2 });
-    await doR2.fetch(post("/record", { ...BASE_EVENT, subjectId: "user-1", input: { secret: "x" } }));
+    await doR2.fetch(
+      post("/record", { ...BASE_EVENT, subjectId: "user-1", input: { secret: "x" } }),
+    );
     await doR2.fetch(post("/dossier", { subjectId: "user-1" }, DOSSIER_HEADERS));
 
     expect(capturedBody).not.toContain("input_hash");
@@ -241,9 +237,9 @@ describe("AuditDO", () => {
   it("alarm is no-op when NOTARY not bound", async () => {
     await do_.fetch(post("/record", { ...BASE_EVENT, input: { x: 1 } }));
     await do_.alarm();
-    const row = db
-      .prepare("SELECT merkle_root FROM audit_events LIMIT 1")
-      .get() as { merkle_root: string | null } | undefined;
+    const row = db.prepare("SELECT merkle_root FROM audit_events LIMIT 1").get() as
+      | { merkle_root: string | null }
+      | undefined;
     expect(row?.merkle_root).toBeNull();
   });
 
@@ -253,9 +249,10 @@ describe("AuditDO", () => {
     await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 1 } }));
     await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 2 } }));
     await doN.alarm();
-    const rows = db
-      .prepare("SELECT merkle_root, notary_sig FROM audit_events")
-      .all() as Array<{ merkle_root: string | null; notary_sig: string | null }>;
+    const rows = db.prepare("SELECT merkle_root, notary_sig FROM audit_events").all() as Array<{
+      merkle_root: string | null;
+      notary_sig: string | null;
+    }>;
     expect(rows).toHaveLength(2);
     for (const row of rows) {
       expect(row.merkle_root).not.toBeNull();
@@ -269,9 +266,9 @@ describe("AuditDO", () => {
     await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 1 } }));
     await doN.fetch(post("/record", { ...BASE_EVENT, input: { x: 2 } }));
     await doN.alarm();
-    const roots = db
-      .prepare("SELECT DISTINCT merkle_root FROM audit_events")
-      .all() as Array<{ merkle_root: string }>;
+    const roots = db.prepare("SELECT DISTINCT merkle_root FROM audit_events").all() as Array<{
+      merkle_root: string;
+    }>;
     expect(roots).toHaveLength(1);
   });
 

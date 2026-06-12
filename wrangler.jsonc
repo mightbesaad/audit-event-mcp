@@ -45,6 +45,26 @@
   "services": [
     { "binding": "NOTARY", "service": "audit-event-notary" }
   ],
+  // Per-tenant cap on approval creations (donor pattern from gvnr): each approval costs DO
+  // writes, a chain event, and (Day 4) a channel send — shared capacity one tenant or one
+  // buggy agent must not drain. "unsafe" is Cloudflare's name for the ratelimit binding
+  // type, not a safety judgement.
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "APPROVAL_RATE_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": { "limit": 30, "period": 60 }
+      }
+    ]
+  },
+  // Secrets (wrangler secret put):
+  //   WEBHOOK_SIGNING_SECRET — master for per-tenant decision-webhook signing keys (D9,
+  //   HKDF-derived per clientId). High-entropy random string. Unset → webhooks are not
+  //   sent (fail closed, never unsigned) and request_approval returns webhookSecret: null.
+  //   Rotation rotates every tenant's secret at once; customers re-read it from the next
+  //   request_approval response.
   "observability": {
     "enabled": true
   },

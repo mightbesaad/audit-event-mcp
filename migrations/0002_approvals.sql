@@ -5,11 +5,17 @@
 -- 'timeout' is computed on read and never stored (decision D3); the CHECK keeps it that way.
 -- modifications / policy_ref / escalated_to are reserved for v1.5 verbs (decision D5) —
 -- never repurpose them.
+-- session_id ties the approval's chain events (approval.requested / approval.decided) to the
+-- agent's session (decision D7); action_payload is the canonical-JSON render copy of what was
+-- hashed (decision D6). Both added Day 2 — before any production DO existed, so extending this
+-- CREATE TABLE in place is safe.
 
 CREATE TABLE IF NOT EXISTS approvals (
   id                   TEXT PRIMARY KEY,
   agent_id             TEXT NOT NULL,
+  session_id           TEXT NOT NULL,
   action_summary       TEXT NOT NULL,
+  action_payload       TEXT,
   action_payload_hash  TEXT,
   status               TEXT NOT NULL DEFAULT 'pending'
                        CHECK (status IN ('pending','approved','denied')),

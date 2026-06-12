@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   MAX_ACTION_SUMMARY_CHARS,
+  MAX_ACTION_TOOL_CHARS,
   MAX_AGENT_ID_CHARS,
   MAX_APPROVAL_ID_CHARS,
   MAX_APPROVAL_TTL_SECONDS,
@@ -8,6 +9,10 @@ import {
   MIN_APPROVAL_TTL_SECONDS,
 } from "@/lib/approval";
 
+// approval.* types are additive (decision D7) and emitted ONLY by the worker layer
+// (approval-flow / ApprovalInternal) — the public record_event surface rejects them so an
+// agent can never fabricate human-decision evidence (guard in index.ts).
+// Reserved for v1.5, do not repurpose: "approval.deferred", "approval.escalated".
 const EVENT_TYPES = [
   "tool.call",
   "tool.result",
@@ -16,7 +21,11 @@ const EVENT_TYPES = [
   "memory.read",
   "memory.write",
   "error.raised",
+  "approval.requested",
+  "approval.decided",
 ] as const;
+
+export const RESERVED_EVENT_TYPE_PREFIX = "approval.";
 
 const LAWFUL_BASES = [
   "legitimate_interest",
@@ -65,14 +74,21 @@ export type DoRecordRequest = z.infer<typeof DoRecordRequestSchema>;
 // a configured channel still get an approval_url back.
 const APPROVAL_CHANNELS = ["telegram", "push", "email"] as const;
 
+// Structured action payload (decision D6). Strict: the witnessed artifact is exactly
+// {tool, args} — extra keys would be hashed but never rendered to the human.
+export const ActionPayloadSchema = z.strictObject({
+  tool: z.string().min(1).max(MAX_ACTION_TOOL_CHARS),
+  args: z.unknown().optional(),
+});
+
 export const ApprovalCreateRequestSchema = z.object({
   agentId: z.string().min(1).max(MAX_AGENT_ID_CHARS),
+  // same shape rule as record_event's sessionId — approval chain events land in this session
+  sessionId: z.string().min(1),
   actionSummary: z.string().min(1).max(MAX_ACTION_SUMMARY_CHARS),
-  // SHA-256 hex of the structured action payload (D6); hashing pipeline arrives with chain events
-  actionPayloadHash: z
-    .string()
-    .regex(/^[0-9a-f]{64}$/)
-    .optional(),
+  // The hash is always computed server-side from this payload (D6) — callers never supply
+  // a hash directly, so the witnessed hash is honest relative to what the human is shown.
+  actionPayload: ActionPayloadSchema.optional(),
   ttlSeconds: z
     .number()
     .int()
