@@ -26,7 +26,7 @@ These live in the workspace `.context/` folder, not in this repo. Deviating from
 4. **Shared R2 bucket** — one `audit-payloads` bucket, per-client isolation via `{client_id}/{event_id}` key prefix in `do.ts`. Never per-client buckets.
 5. **CF Access JWT routing** — Worker reads `payload.custom.client_id` from the CF Access JWT; DO name = `audit-do-{client_id}`. Never use URL segments for client routing.
 6. **Hash chain algorithm** — locked. `input_hash_slot = input_hash ?? input_hash_omitted_reason`. Never empty string. `chain_hash = SHA-256(id + "|" + event_type + "|" + input_hash_slot + "|" + (prev_hash ?? ""))`. Do not change without a new decision entry.
-7. **Four MCP tools exactly** — `record_event`, `verify_chain`, `query_events`, `export_dossier`. Do not add tools without a new decision.
+7. **Six MCP tools exactly** — `record_event`, `verify_chain`, `query_events`, `export_dossier`, `request_approval`, `check_approval`. Was four; widened by the witness integration decision (kajaril-witness-integration-draft.md §3, Day 3, 2026-06-12). Do not add tools without a new decision.
 8. **`payload_ref` never returned** — tool responses never include `payload_ref` keys or raw payload content. This is a privacy invariant.
 9. **`NOTARY_PRIVATE_KEY` is a Workers Secret** — set via `wrangler secret put`, never in source, comments, or commits.
 10. **`migrations/0001_init.sql` is applied by `do.ts`** — the DO constructor calls `state.storage.sql.exec(SCHEMA_SQL)`. Never apply via `wrangler d1 migrations apply`.
@@ -96,6 +96,7 @@ Do not read or write outside the repo root without an explicit ask.
 | Scaffolding + hash chain (M8 foundation) | _in progress_ | 2026-05-15 |
 | Witness Day 1: approvals in AuditDO, HMAC link tokens, go.kajaril.com worker + approve page | done | 2026-06-11 — see kajaril-witness-integration-draft.md §3; not yet deployed |
 | Witness Day 2: approval.requested/decided chain events, action-payload hashing (D6), signed decision webhook (D9), per-channel TTL, rate limiter | done | 2026-06-12 — webhook-secret design recorded as D9 in the draft; not yet deployed |
+| Witness Day 3: M2M client-credentials auth (hand-rolled, D2/D10), tool dispatch 4→6, REST approval surface, approval_url minting | done | 2026-06-12 — credential-storage design recorded as D10 in the draft; MCP browser OAuth flow awaits founder's workers-oauth-provider version choice; not yet deployed |
 
 Update this table as milestones close.
 
