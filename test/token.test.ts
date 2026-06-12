@@ -18,7 +18,11 @@ describe("approval link token", () => {
 
   it("rejects a tampered signature", async () => {
     const token = await mintApprovalToken(SECRET, PAYLOAD);
-    const flipped = token.slice(0, -1) + (token.endsWith("A") ? "B" : "A");
+    // Tamper the FIRST signature char: the 32-byte sig is 43 base64url chars, so the last
+    // char carries only 4 significant bits — flipping it can decode to the identical
+    // signature (flaked ~1 in 64 runs). Every bit of the first char is significant.
+    const [v, p, sig] = token.split(".") as [string, string, string];
+    const flipped = `${v}.${p}.${(sig[0] === "A" ? "B" : "A") + sig.slice(1)}`;
     expect(await verifyApprovalToken(SECRET, flipped)).toBeNull();
   });
 
