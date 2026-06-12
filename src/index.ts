@@ -1,5 +1,18 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { isValidClientIdShape } from "@/lib/approval";
+import { checkApproval, requestApproval, tenantStub } from "@/lib/approval-flow";
+import {
+  ACCESS_TOKEN_TTL_SECONDS,
+  constantTimeEqualHex,
+  generateClientSecret,
+  isM2MScope,
+  type M2MScope,
+  MAX_CLIENT_SECRET_CHARS,
+  mintAccessToken,
+  sha256Hex,
+  verifyAccessToken,
+} from "@/lib/m2m";
 import { RESERVED_EVENT_TYPE_PREFIX } from "@/lib/schema";
 import type { Env } from "@/lib/types";
 import { MCP_TOOL_DEFINITIONS } from "@/mcp/tool-definitions";
@@ -105,8 +118,277 @@ export async function verifyJwt(jwt: string, teamDomain: string): Promise<string
   return typeof clientId === "string" ? clientId : null;
 }
 
+// --- caller authentication (decision D2) ---
+// Two ways in, checked in this order:
+//   1. CF Access JWT (CF-Access-Jwt-Assertion) — the manually-onboarded service-token path.
+//      Admin-equivalent: Access is the outer fence for these tenants. Checked first because
+//      Access injects this header on the custom domain regardless of other headers.
+//   2. Bearer access token minted by POST /oauth/token — the self-serve M2M path, carrying
+//      an agent or admin scope.
+// Fail closed in both lanes: the verified claim is the ONLY thing that ever selects a
+// tenant DO / R2 prefix, so a missing verification key means refusing the request (503),
+// never trusting an undecoded token — anyone could forge client_id on the workers.dev URL.
+
+type AuthOk = { ok: true; clientId: string; scope: M2MScope };
+type AuthFail = { ok: false; status: 401 | 503; error: string; detail: string };
+
+async function authenticate(
+  req: { header: (name: string) => string | undefined },
+  env: Env,
+): Promise<AuthOk | AuthFail> {
+  const cfJwt = req.header("CF-Access-Jwt-Assertion");
+  if (cfJwt) {
+    if (!env.CF_ACCESS_TEAM_DOMAIN) {
+      return {
+        ok: false,
+        status: 503,
+        error: "Server misconfigured",
+        detail: "CF_ACCESS_TEAM_DOMAIN is not set; refusing to process unverified tokens",
+      };
+    }
+    const clientId = await verifyJwt(cfJwt, env.CF_ACCESS_TEAM_DOMAIN);
+    if (!clientId) {
+      return { ok: false, status: 401, error: "Unauthorized", detail: "Invalid CF Access token" };
+    }
+    return { ok: true, clientId, scope: "admin" };
+  }
+
+  const authz = req.header("Authorization");
+  if (authz?.startsWith("Bearer ")) {
+    if (!env.M2M_TOKEN_SIGNING_SECRET) {
+      return {
+        ok: false,
+        status: 503,
+        error: "Server misconfigured",
+        detail: "M2M_TOKEN_SIGNING_SECRET is not set; refusing to process unverifiable tokens",
+      };
+    }
+    const claims = await verifyAccessToken(
+      env.M2M_TOKEN_SIGNING_SECRET,
+      authz.slice("Bearer ".length),
+    );
+    if (!claims) {
+      return {
+        ok: false,
+        status: 401,
+        error: "Unauthorized",
+        detail: "Invalid or expired access token",
+      };
+    }
+    return { ok: true, clientId: claims.clientId, scope: claims.scope };
+  }
+
+  return {
+    ok: false,
+    status: 401,
+    error: "Unauthorized",
+    detail: "Credentials required: CF Access JWT or Bearer access token",
+  };
+}
+
+// What an agent-scoped token may call (D2): write evidence, drive approvals. Reading
+// chains, querying events, and exporting dossiers stay admin-only.
+const AGENT_SCOPE_TOOLS = new Set(["record_event", "request_approval", "check_approval"]);
+
+const DO_PATH_BY_TOOL: Record<string, string> = {
+  record_event: "/record",
+  verify_chain: "/verify",
+  query_events: "/query",
+  export_dossier: "/dossier",
+};
+
 app.get("/health", (c) => {
   return c.json({ status: "ok", product: "audit-event-mcp", version: "0.1.0" });
+});
+
+// --- OAuth 2.1 client-credentials token endpoint (D2) ---
+// Hand-rolled on Web Crypto (Day-0 supply-chain rule: no new dependency for this).
+// Error vocabulary is RFC 6749 §5.2; every response is uncacheable per §5.1.
+app.post("/oauth/token", async (c) => {
+  const oauthError = (status: 400 | 401 | 429 | 503, error: string, description: string) =>
+    c.json({ error, error_description: description }, status, {
+      "Cache-Control": "no-store",
+      ...(status === 401 ? { "WWW-Authenticate": 'Basic realm="oauth/token"' } : {}),
+    });
+
+  if (!c.env.M2M_TOKEN_SIGNING_SECRET) {
+    return oauthError(
+      503,
+      "temporarily_unavailable",
+      "M2M_TOKEN_SIGNING_SECRET is not set; token issuance is disabled",
+    );
+  }
+
+  // Per-IP cap before any parsing or DO work — this is the only endpoint where an
+  // unauthenticated caller can make the worker do real work.
+  if (c.env.APPROVAL_RATE_LIMITER) {
+    const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+    const { success } = await c.env.APPROVAL_RATE_LIMITER.limit({ key: `tok-ip:${ip}` });
+    if (!success) {
+      return oauthError(429, "slow_down", "Too many token requests from this address");
+    }
+  }
+
+  let form: Record<string, unknown>;
+  try {
+    form = await c.req.parseBody();
+  } catch {
+    return oauthError(400, "invalid_request", "Body must be application/x-www-form-urlencoded");
+  }
+
+  if (form.grant_type !== "client_credentials") {
+    return oauthError(
+      400,
+      "unsupported_grant_type",
+      "grant_type must be client_credentials (application/x-www-form-urlencoded body)",
+    );
+  }
+
+  const scope = form.scope;
+  if (!isM2MScope(scope)) {
+    return oauthError(400, "invalid_scope", "scope must be exactly 'agent' or 'admin'");
+  }
+
+  // Client auth: HTTP Basic preferred (RFC 6749 §2.3.1), form params as the fallback.
+  let clientId: string | undefined;
+  let clientSecret: string | undefined;
+  const authz = c.req.header("Authorization");
+  if (authz?.startsWith("Basic ")) {
+    try {
+      const decoded = atob(authz.slice("Basic ".length));
+      const sep = decoded.indexOf(":");
+      if (sep === -1) throw new Error("no separator");
+      clientId = decodeURIComponent(decoded.slice(0, sep));
+      clientSecret = decodeURIComponent(decoded.slice(sep + 1));
+    } catch {
+      return oauthError(401, "invalid_client", "Malformed Basic authorization header");
+    }
+  } else {
+    clientId = typeof form.client_id === "string" ? form.client_id : undefined;
+    clientSecret = typeof form.client_secret === "string" ? form.client_secret : undefined;
+  }
+
+  // Uniform invalid_client for every credential failure from here on — malformed id,
+  // unknown tenant, no credential issued, wrong secret — so the endpoint confirms
+  // nothing about which tenants exist.
+  if (
+    !clientId ||
+    !clientSecret ||
+    !isValidClientIdShape(clientId) ||
+    clientSecret.length > MAX_CLIENT_SECRET_CHARS
+  ) {
+    return oauthError(401, "invalid_client", "Client authentication failed");
+  }
+
+  if (c.env.APPROVAL_RATE_LIMITER) {
+    const { success } = await c.env.APPROVAL_RATE_LIMITER.limit({ key: `tok:${clientId}` });
+    if (!success) {
+      return oauthError(429, "slow_down", "Too many token requests for this client");
+    }
+  }
+
+  // The one place an unverified client_id reaches idFromName: a credential cannot be
+  // checked without reading the claimed tenant's stored hash. Shape-checked and
+  // rate-limited above, and nothing leaves this handler unless the presented secret
+  // hashes to that stored value — an empty DO for a made-up tenant holds no credential
+  // row, so the comparison can never succeed.
+  const credRes = await tenantStub(c.env, clientId).fetch("https://do-internal/credential/get", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope }),
+  });
+  if (!credRes.ok) {
+    return oauthError(401, "invalid_client", "Client authentication failed");
+  }
+  const { secretHash } = (await credRes.json()) as { secretHash: string };
+
+  if (!constantTimeEqualHex(await sha256Hex(clientSecret), secretHash)) {
+    return oauthError(401, "invalid_client", "Client authentication failed");
+  }
+
+  const accessToken = await mintAccessToken(c.env.M2M_TOKEN_SIGNING_SECRET, { clientId, scope });
+  return c.json(
+    {
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: ACCESS_TOKEN_TTL_SECONDS,
+      scope,
+    },
+    200,
+    { "Cache-Control": "no-store", Pragma: "no-cache" },
+  );
+});
+
+// Mint or rotate an M2M client secret (D2): one credential per scope, issued separately,
+// rotated independently. The founder's CF Access service token bootstraps the first
+// credential during onboarding; an admin Bearer token can rotate from then on. The
+// plaintext secret appears exactly once, in this response — only its hash is stored.
+app.post("/credentials/rotate", async (c) => {
+  const auth = await authenticate(c.req, c.env);
+  if (!auth.ok) return c.json({ error: auth.error, detail: auth.detail }, auth.status);
+  if (auth.scope !== "admin") {
+    return c.json(
+      { error: "insufficient_scope", detail: "Rotating credentials requires the admin scope" },
+      403,
+    );
+  }
+
+  let scope: unknown;
+  try {
+    scope = ((await c.req.json()) as { scope?: unknown }).scope;
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  if (!isM2MScope(scope)) {
+    return c.json(
+      { error: "invalid_scope", detail: "scope must be exactly 'agent' or 'admin'" },
+      400,
+    );
+  }
+
+  const clientSecret = generateClientSecret(scope);
+  const res = await tenantStub(c.env, auth.clientId).fetch("https://do-internal/credential/set", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope, secretHash: await sha256Hex(clientSecret) }),
+  });
+  if (!res.ok) return c.json({ error: "credential_store_failed" }, 500);
+
+  return c.json(
+    {
+      clientId: auth.clientId,
+      scope,
+      clientSecret,
+      note: "Store this now — it is shown once and never retrievable. Rotating replaces it immediately.",
+    },
+    200,
+    { "Cache-Control": "no-store" },
+  );
+});
+
+// --- REST approval surface (D2: the production lane for M2M clients) ---
+// Same flow functions as the MCP tools; {status, body} passes through unchanged.
+
+app.post("/approvals", async (c) => {
+  const auth = await authenticate(c.req, c.env);
+  if (!auth.ok) return c.json({ error: auth.error, detail: auth.detail }, auth.status);
+
+  let input: unknown;
+  try {
+    input = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  const flow = await requestApproval(c.env, auth.clientId, input);
+  return c.json(flow.body as Record<string, unknown>, flow.status as 200);
+});
+
+app.get("/approvals/:id", async (c) => {
+  const auth = await authenticate(c.req, c.env);
+  if (!auth.ok) return c.json({ error: auth.error, detail: auth.detail }, auth.status);
+
+  const flow = await checkApproval(c.env, auth.clientId, c.req.param("id"));
+  return c.json(flow.body as Record<string, unknown>, flow.status as 200);
 });
 
 app.get("/.well-known/mcp/server-card.json", (c) => {
@@ -129,29 +411,11 @@ app.get("/mcp", (c) => {
 });
 
 app.post("/mcp", async (c) => {
-  const jwtHeader = c.req.header("CF-Access-Jwt-Assertion");
-  if (!jwtHeader) {
-    return c.json({ error: "Unauthorized", detail: "CF Access token required" }, 401);
+  const auth = await authenticate(c.req, c.env);
+  if (!auth.ok) {
+    return c.json({ error: auth.error, detail: auth.detail }, auth.status);
   }
-
-  // Fail closed: the client_id claim selects the per-tenant Durable Object and R2 prefix, so it
-  // MUST come from a signature-verified token. Without CF_ACCESS_TEAM_DOMAIN we cannot fetch the
-  // JWKS to verify, and decoding the payload unverified would let anyone forge custom.client_id
-  // and impersonate any tenant (e.g. by hitting the *.workers.dev URL, which is not behind the
-  // Access policy bound to the custom domain). Refuse rather than trust the upstream proxy.
-  if (!c.env.CF_ACCESS_TEAM_DOMAIN) {
-    return c.json(
-      {
-        error: "Server misconfigured",
-        detail: "CF_ACCESS_TEAM_DOMAIN is not set; refusing to process unverified tokens",
-      },
-      503,
-    );
-  }
-  const clientId = await verifyJwt(jwtHeader, c.env.CF_ACCESS_TEAM_DOMAIN);
-  if (!clientId) {
-    return c.json({ error: "Unauthorized", detail: "Invalid CF Access token" }, 401);
-  }
+  const clientId = auth.clientId;
 
   let body: { jsonrpc: string; id?: unknown; method?: string; params?: unknown };
   try {
@@ -212,6 +476,35 @@ app.post("/mcp", async (c) => {
       );
     }
 
+    const isApprovalFlowTool = toolName === "request_approval" || toolName === "check_approval";
+    const doPath = DO_PATH_BY_TOOL[toolName];
+    if (!isApprovalFlowTool && doPath === undefined) {
+      return c.json(
+        {
+          jsonrpc: "2.0",
+          id: body.id,
+          error: { code: -32601, message: `Unknown tool: ${toolName}` },
+        },
+        404,
+      );
+    }
+
+    // Scope gate (D2). CF Access callers arrive as admin; agent-scoped Bearer tokens may
+    // write evidence and drive approvals but never read chains or export dossiers.
+    if (auth.scope !== "admin" && !AGENT_SCOPE_TOOLS.has(toolName)) {
+      return c.json(
+        {
+          jsonrpc: "2.0",
+          id: body.id,
+          error: {
+            code: -32001,
+            message: `insufficient scope: ${toolName} requires the admin scope`,
+          },
+        },
+        403,
+      );
+    }
+
     // approval.* chain events are emitted by the witness itself when an approval is
     // requested/decided. An agent recording one directly would fabricate human-decision
     // evidence, so the public surface refuses them (D7).
@@ -232,24 +525,31 @@ app.post("/mcp", async (c) => {
       }
     }
 
+    // The two approval tools go through the worker-layer flow (rate limit, chain event,
+    // approval_url/webhookSecret minting), not straight to a DO path. The JWT-verified
+    // clientId is the only tenant selector either flow ever sees.
+    if (toolName === "request_approval") {
+      const flow = await requestApproval(c.env, clientId, toolArgs);
+      return c.json({ jsonrpc: "2.0", id: body.id, result: flow.body }, flow.status as 200);
+    }
+    if (toolName === "check_approval") {
+      const approvalId = (toolArgs as { approvalId?: unknown }).approvalId;
+      if (typeof approvalId !== "string") {
+        return c.json(
+          {
+            jsonrpc: "2.0",
+            id: body.id,
+            error: { code: -32602, message: "check_approval requires arguments.approvalId" },
+          },
+          400,
+        );
+      }
+      const flow = await checkApproval(c.env, clientId, approvalId);
+      return c.json({ jsonrpc: "2.0", id: body.id, result: flow.body }, flow.status as 200);
+    }
+
     const doId = c.env.AUDIT_DO.idFromName(`audit-do-${clientId}`);
     const stub = c.env.AUDIT_DO.get(doId);
-
-    let doPath: string;
-    if (toolName === "record_event") doPath = "/record";
-    else if (toolName === "verify_chain") doPath = "/verify";
-    else if (toolName === "query_events") doPath = "/query";
-    else if (toolName === "export_dossier") doPath = "/dossier";
-    else {
-      return c.json(
-        {
-          jsonrpc: "2.0",
-          id: body.id,
-          error: { code: -32601, message: `Unknown tool: ${toolName}` },
-        },
-        404,
-      );
-    }
 
     try {
       const doHeaders: Record<string, string> = { "Content-Type": "application/json" };

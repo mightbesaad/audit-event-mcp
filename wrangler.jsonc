@@ -17,6 +17,8 @@
   // With it unset, /mcp fails closed (503) instead of trusting an unverified token.
   "vars": {
     "CF_ACCESS_TEAM_DOMAIN": "aged-limit-247a.cloudflareaccess.com"
+    // APPROVAL_LINK_BASE_URL — optional override for where approval links point;
+    // defaults in code to https://go.kajaril.com (the go worker, decision D1).
   },
   // DO namespace created implicitly on first `wrangler deploy` — no separate CLI command needed.
   "durable_objects": {
@@ -65,6 +67,13 @@
   //   sent (fail closed, never unsigned) and request_approval returns webhookSecret: null.
   //   Rotation rotates every tenant's secret at once; customers re-read it from the next
   //   request_approval response.
+  //   APPROVAL_TOKEN_SECRET — HMAC key for approval link tokens (D3). MUST hold the same
+  //   value as the go worker's secret of the same name: that worker verifies what this one
+  //   mints into request_approval's approval_url. Unset → approvalUrl: null (polling works).
+  //   M2M_TOKEN_SIGNING_SECRET — signing key for OAuth client-credentials access tokens
+  //   (D2). High-entropy random string. Unset → /oauth/token and Bearer auth fail closed
+  //   (503). Rotation invalidates every outstanding access token (clients re-auth within
+  //   the hour); client secrets are unaffected (hashes live in each tenant's DO).
   "observability": {
     "enabled": true
   },

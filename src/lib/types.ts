@@ -92,6 +92,15 @@ export interface Env {
   // webhooks are not sent and request_approval returns webhookSecret: null. Fail closed:
   // an unsigned webhook is forgeable and never leaves the worker.
   WEBHOOK_SIGNING_SECRET?: string;
+  // HMAC key for the approval link tokens (D3), a Workers Secret bound to BOTH workers with
+  // the same value: the go worker verifies links, this worker mints them so request_approval
+  // can return approval_url. Unset → approvalUrl: null (the approval still works via polling).
+  APPROVAL_TOKEN_SECRET?: string;
+  // Where approval links point. Defaults to the production go worker; self-hosters override.
+  APPROVAL_LINK_BASE_URL?: string;
+  // Signing key for M2M access tokens (D2), a Workers Secret. Unset → /oauth/token and
+  // Bearer auth fail closed (503): a token we cannot verify must never select a tenant.
+  M2M_TOKEN_SIGNING_SECRET?: string;
 }
 
 // Env for the go.kajaril.com public worker (wrangler.go.jsonc / src/go.ts).

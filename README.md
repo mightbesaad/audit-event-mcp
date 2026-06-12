@@ -23,7 +23,9 @@ Agent steward infrastructure — hash-chained audit log with Merkle notarisation
 https://audit-event.kajaril.com/mcp
 ```
 
-JSON-RPC 2.0 over HTTPS, authenticated via Cloudflare Access. Contact [studio@kajaril.com](mailto:studio@kajaril.com) for a service token.
+JSON-RPC 2.0 over HTTPS, authenticated via Cloudflare Access (service token) or an OAuth
+client-credentials access token — see [Authentication](#authentication). Contact
+[studio@kajaril.com](mailto:studio@kajaril.com) for onboarding.
 
 ## Tools
 
@@ -33,6 +35,8 @@ JSON-RPC 2.0 over HTTPS, authenticated via Cloudflare Access. Contact [studio@ka
 | `verify_chain` | Recompute `chain_hash` for a range of events. Returns verified count and broken entries. |
 | `query_events` | Filter by session, agent, event type, or date range. `input_hash` is never returned. |
 | `export_dossier` | Export all events for a `subjectId` as NDJSON (GDPR Art. 20). Returns a 1-hour download URL. |
+| `request_approval` | Ask a human to approve an action. Returns `approvalId`, an `approvalUrl` approve page, and your `webhookSecret`. Witnessed as `approval.requested` in the chain. |
+| `check_approval` | Poll an approval: `pending \| approved \| denied \| timeout`, with reason and responder once decided. |
 
 ## Quick start
 
@@ -46,6 +50,7 @@ Record an event:
   "params": {
     "name": "record_event",
     "arguments": {
+      "agentId": "travel-assistant",
       "eventType": "tool.call",
       "purpose": "User requested flight search via travel assistant",
       "sessionId": "550e8400-e29b-41d4-a716-446655440000",
@@ -70,6 +75,38 @@ Export a data subject's records:
 { "jsonrpc": "2.0", "id": 3, "method": "tools/call",
   "params": { "name": "export_dossier", "arguments": { "subjectId": "user-8821" } } }
 ```
+
+## Authentication
+
+Two ways in; both end at a signature-verified `client_id` that selects your tenant — nothing
+user-supplied ever does.
+
+**Cloudflare Access service token** (manual onboarding): send the token headers, CF Access
+injects a verified JWT. Full surface.
+
+**OAuth client-credentials (M2M)**: exchange a client secret for a 1-hour Bearer token at
+`POST /oauth/token` (`application/x-www-form-urlencoded`, HTTP Basic or `client_id` /
+`client_secret` body params):
+
+```sh
+curl -s https://audit-event.kajaril.com/oauth/token \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -d grant_type=client_credentials -d scope=agent
+```
+
+Two scopes, issued and rotated independently:
+
+| Scope | May call |
+|---|---|
+| `agent` | `record_event`, `request_approval`, `check_approval` |
+| `admin` | everything, plus `POST /credentials/rotate` |
+
+Secrets are shown once at issue/rotation (`POST /credentials/rotate`, body `{"scope":"agent"}`)
+and stored only as hashes in your tenant's Durable Object. Rotating a scope invalidates its
+old secret immediately; outstanding access tokens expire within the hour.
+
+The approval tools are also plain REST for production backends: `POST /approvals` (same body
+as `request_approval`) and `GET /approvals/:id`, with `Authorization: Bearer <access token>`.
 
 ## How it works
 

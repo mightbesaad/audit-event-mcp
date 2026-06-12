@@ -16,6 +16,12 @@ export interface ApprovalTokenPayload {
   exp: number;
 }
 
+// How long a link token stays verifiable past the approval's own expires_at: a late
+// clicker should see the terminal state ("expired", "already decided"), never "invalid
+// link". Deciding is still blocked by the computed-on-read expiry, so the grace window
+// extends visibility only, not the approval's life.
+export const APPROVAL_LINK_GRACE_SECONDS = 7 * 24 * 60 * 60;
+
 const TOKEN_VERSION = "v1";
 // Generous upper bound — real tokens are ~150-300 chars. Anything bigger is garbage
 // and gets refused before any crypto work.

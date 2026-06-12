@@ -291,6 +291,62 @@ describe("AuditDO", () => {
     void notary; // suppress unused variable warning
   });
 
+  // --- credentials (D2) ---
+
+  it("credential set then get round-trips the hash, per scope", async () => {
+    const agentHash = "a".repeat(64);
+    const adminHash = "b".repeat(64);
+    expect(
+      (await do_.fetch(post("/credential/set", { scope: "agent", secretHash: agentHash }))).status,
+    ).toBe(200);
+    expect(
+      (await do_.fetch(post("/credential/set", { scope: "admin", secretHash: adminHash }))).status,
+    ).toBe(200);
+
+    const got = await do_.fetch(post("/credential/get", { scope: "agent" }));
+    expect(got.status).toBe(200);
+    expect(((await got.json()) as { secretHash: string }).secretHash).toBe(agentHash);
+
+    const gotAdmin = await do_.fetch(post("/credential/get", { scope: "admin" }));
+    expect(((await gotAdmin.json()) as { secretHash: string }).secretHash).toBe(adminHash);
+  });
+
+  it("credential get returns 404 when nothing was issued", async () => {
+    const res = await do_.fetch(post("/credential/get", { scope: "agent" }));
+    expect(res.status).toBe(404);
+  });
+
+  it("credential set replaces the hash and stamps rotated_at, keeping created_at", async () => {
+    await do_.fetch(post("/credential/set", { scope: "agent", secretHash: "a".repeat(64) }));
+    const first = db.prepare("SELECT created_at, rotated_at FROM credentials").get() as {
+      created_at: string;
+      rotated_at: string | null;
+    };
+    expect(first.rotated_at).toBeNull();
+
+    await do_.fetch(post("/credential/set", { scope: "agent", secretHash: "c".repeat(64) }));
+    const second = db.prepare("SELECT secret_hash, created_at, rotated_at FROM credentials").get() as {
+      secret_hash: string;
+      created_at: string;
+      rotated_at: string | null;
+    };
+    expect(second.secret_hash).toBe("c".repeat(64));
+    expect(second.created_at).toBe(first.created_at);
+    expect(second.rotated_at).not.toBeNull();
+  });
+
+  it("credential set refuses bad scopes and non-hash values", async () => {
+    expect(
+      (await do_.fetch(post("/credential/set", { scope: "root", secretHash: "a".repeat(64) })))
+        .status,
+    ).toBe(400);
+    expect(
+      (await do_.fetch(post("/credential/set", { scope: "agent", secretHash: "plaintext!" })))
+        .status,
+    ).toBe(400);
+    expect((await do_.fetch(post("/credential/get", { scope: "root" }))).status).toBe(400);
+  });
+
   // --- routing ---
 
   it("unknown path returns 404", async () => {

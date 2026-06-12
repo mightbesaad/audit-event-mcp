@@ -29,6 +29,23 @@ tenant at once. A per-tenant rotation surface needs key versioning in the deriva
 string (`kajaril-webhook-v2:…` or `…:v<N>`) plus a way to signal the active version to the
 customer. Needs the admin surface anyway — bundle with it.
 
+## M2M access-token revocation before expiry (Day 3)
+
+Access tokens are stateless HS256 JWTs: nothing exists to revoke one against, and the 1-hour
+TTL bounds the exposure. Rotating the client secret stops NEW tokens immediately; rotating
+M2M_TOKEN_SIGNING_SECRET kills every outstanding token across all tenants at once. If a
+customer ever needs surgical revocation (leaked token, fired contractor), the shape is a jti
+denylist in the tenant DO checked on Bearer auth — one read per request. Do not build it
+before someone asks; the two rotation levers cover the realistic cases.
+
+## Negative-cache for token-endpoint DO instantiation (Day 3)
+
+POST /oauth/token is the one place an unverified client_id reaches idFromName — a credential
+cannot be checked without reading the claimed tenant's stored hash, so garbage client_ids
+instantiate empty DOs (constructor runs CREATE TABLE; pennies of storage). Shape checks plus
+the per-IP and per-client rate caps (30/min each) bound the damage. If abuse shows up in
+observability, add a KV negative-cache or move the credential index out of the DO; not before.
+
 ## Rate limiting on the go worker's decide endpoint
 
 Approval creation is rate-limited per tenant (30/min). The public decide POST is gated by the
