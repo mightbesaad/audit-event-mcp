@@ -49,6 +49,7 @@ h1{font-size:1.2rem;font-weight:600;letter-spacing:-0.01em;margin-bottom:14px}
 .agent{font-family:"SF Mono","Fira Code",monospace;color:#a78bfa}
 .hash{font-family:"SF Mono","Fira Code",monospace;font-size:0.72rem;color:#666;word-break:break-all}
 .action{background:#0f0f0f;border:1px solid #1f1f1f;border-radius:8px;padding:12px 14px;font-size:0.92rem;color:#ccc;margin:8px 0 18px;line-height:1.5}
+.payload{background:#0f0f0f;border:1px solid #1f1f1f;border-radius:8px;padding:12px 14px;font-family:"SF Mono","Fira Code",monospace;font-size:0.75rem;color:#9ca3af;margin:0 0 14px;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow-y:auto}
 .expires{font-size:0.8rem;color:#888;margin-bottom:20px}
 form{display:block;margin:0}
 form + form{margin-top:10px}
@@ -73,6 +74,18 @@ textarea::placeholder{color:#555}
 
 const FOOT = `<div class="foot">— <a href="https://kajaril.com">kajaril</a> · the neutral witness for agent actions</div>`;
 
+// D6: the human sees the agent's claim (summary) AND the structured payload that was hashed —
+// never one without the other when a payload exists. Escaped like every attacker-influenced field.
+function payloadBlock(record: ApprovalRecord): string {
+  if (!record.actionPayload) return "";
+  const toolRow = `<div class="row"><strong>Tool</strong> · <span class="agent">${escapeHtml(record.actionPayload.tool)}</span></div>`;
+  const args =
+    record.actionPayload.args === undefined
+      ? ""
+      : `<div class="payload">${escapeHtml(JSON.stringify(record.actionPayload.args, null, 2))}</div>`;
+  return toolRow + args;
+}
+
 function renderPending(record: ApprovalRecord, token: string): string {
   const expiresMin = Math.max(1, Math.round((Date.parse(record.expiresAt) - Date.now()) / 60_000));
   const hashRow = record.actionPayloadHash
@@ -86,6 +99,7 @@ function renderPending(record: ApprovalRecord, token: string): string {
   <h1>Approve agent action?</h1>
   <div class="row"><strong>Agent</strong> · <span class="agent">${escapeHtml(record.agentId)}</span></div>
   <div class="action">${escapeHtml(record.actionSummary)}</div>
+  ${payloadBlock(record)}
   ${hashRow}
   <div class="expires">Expires in ~${expiresMin} min</div>
   <form method="POST" action="${action}">
