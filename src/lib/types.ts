@@ -106,6 +106,20 @@ export interface Env {
   // Signing key for M2M access tokens (D2), a Workers Secret. Unset → /oauth/token and
   // Bearer auth fail closed (503): a token we cannot verify must never select a tenant.
   M2M_TOKEN_SIGNING_SECRET?: string;
+  // Channel routing config (D4): connect codes, telegram chat bindings, approver email.
+  // Bound to BOTH workers — the go worker's Telegram webhook resolves chat → tenant here.
+  // Mutable routing state only, never evidence: nothing in this KV is witnessed material,
+  // and losing it disconnects channels without touching any chain. Unset → channel sends
+  // are skipped; approvals still work via approval_url + polling.
+  CHANNELS_KV?: KVNamespace;
+  // Telegram bot credentials (D4), Workers Secrets. The token sends approval cards from
+  // this worker; the go worker holds the same token to answer callbacks. The username is
+  // a plain var (it is public — it appears in every t.me deep link).
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_BOT_USERNAME?: string;
+  // Resend API key (D4 email fallback), a Workers Secret. The DO reads it when an
+  // escalation alarm fires. Unset → email escalations are recorded as skipped.
+  RESEND_API_KEY?: string;
 }
 
 // Env for the go.kajaril.com public worker (wrangler.go.jsonc / src/go.ts).
@@ -114,4 +128,11 @@ export interface Env {
 export interface GoEnv {
   AUDIT: import("@/lib/approval").ApprovalInternalClient;
   APPROVAL_TOKEN_SECRET?: string;
+  // Telegram webhook surface (D4). The webhook secret is OUR value, registered with
+  // setWebhook and echoed back by Telegram in X-Telegram-Bot-Api-Secret-Token — the only
+  // proof an update really came from Telegram. Any of the three unset → /tg/webhook
+  // fails closed (503).
+  CHANNELS_KV?: KVNamespace;
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
 }

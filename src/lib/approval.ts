@@ -19,6 +19,10 @@ export function defaultTtlSeconds(channels: readonly string[]): number {
   const emailOnly = !hasInstant && channels.includes("email");
   return emailOnly ? EMAIL_ONLY_APPROVAL_TTL_SECONDS : DEFAULT_APPROVAL_TTL_SECONDS;
 }
+// The fallback rung of the channel ladder (D4): when an instant channel delivered, email
+// fires only if the approval is still unacked 10 minutes later. With no instant channel
+// delivered, email fires immediately (the escalation is armed at "now").
+export const EMAIL_ESCALATION_DELAY_SECONDS = 10 * 60;
 export const MAX_ACTION_SUMMARY_CHARS = 280;
 export const MAX_AGENT_ID_CHARS = 128;
 export const MAX_REASON_CHARS = 500;

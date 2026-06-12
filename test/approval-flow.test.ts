@@ -1,9 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditDO } from "@/do";
-import { requestApproval } from "@/lib/approval-flow";
+import { type ChannelDispatch, requestApproval } from "@/lib/approval-flow";
+import { kvEmailForClient } from "@/lib/notify";
+import { kvChatForClient } from "@/lib/telegram";
 import type { Env } from "@/lib/types";
-import { fakeEnv, makeState } from "./harness";
+import { fakeEnv, makeMockKV, makeState } from "./harness";
 
 const { DatabaseSync: DBSync } = await import("node:sqlite");
 
@@ -114,5 +116,125 @@ describe("requestApproval flow", () => {
     expect(events.n).toBe(0);
     const approvals = db.prepare("SELECT COUNT(*) AS n FROM approvals").get() as { n: number };
     expect(approvals.n).toBe(0);
+  });
+});
+
+// --- channel ladder (D4): telegram now, email escalation armed in the DO ---
+
+describe("requestApproval — channel ladder dispatch", () => {
+  let db: DatabaseSync;
+  let do_: AuditDO;
+  let env: Env;
+  let kv: ReturnType<typeof makeMockKV>;
+  let telegramStatus: number;
+  let telegramCalls: number;
+
+  beforeEach(() => {
+    db = new DBSync(":memory:");
+    kv = makeMockKV();
+    telegramStatus = 200;
+    telegramCalls = 0;
+    env = {
+      AUDIT_DO: {
+        idFromName: (name: string) => name,
+        get: () => ({
+          fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+        }),
+      } as unknown as Env["AUDIT_DO"],
+      CHANNELS_KV: kv,
+      TELEGRAM_BOT_TOKEN: "123456:TEST-TOKEN",
+      RESEND_API_KEY: "re_test_key",
+      APPROVAL_TOKEN_SECRET: "test-approval-link-secret",
+    } as Env;
+    // The DO shares the worker env: its alarm path reads the same secrets.
+    do_ = new AuditDO(makeState(db), env);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      if (!String(input).includes("api.telegram.org")) {
+        throw new Error(`Unexpected fetch: ${String(input)}`);
+      }
+      telegramCalls++;
+      return new Response(JSON.stringify({ ok: true }), { status: telegramStatus });
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    vi.unstubAllGlobals();
+  });
+
+  async function request(input: Record<string, unknown> = {}): Promise<ChannelDispatch> {
+    const result = await requestApproval(env, CLIENT_ID, { ...INPUT, ...input });
+    expect(result.status).toBe(200);
+    return (result.body as { notifications: ChannelDispatch }).notifications;
+  }
+
+  function escalationRow(): { due_at: string; email_to: string } | undefined {
+    return db.prepare("SELECT due_at, email_to FROM escalations").get() as
+      | { due_at: string; email_to: string }
+      | undefined;
+  }
+
+  it("instant channel delivered → card sent now, email escalation armed at +10 min", async () => {
+    await kv.put(kvChatForClient(CLIENT_ID), "777");
+    await kv.put(kvEmailForClient(CLIENT_ID), "founder@example.com");
+    const before = Date.now();
+
+    const n = await request({ channels: ["telegram", "email"] });
+    expect(n).toEqual({ telegram: "sent", email: "scheduled" });
+    expect(telegramCalls).toBe(1);
+
+    const row = escalationRow();
+    expect(row?.email_to).toBe("founder@example.com");
+    const dueIn = Date.parse(row?.due_at ?? "") - before;
+    expect(dueIn).toBeGreaterThanOrEqual(10 * 60 * 1000 - 100);
+    expect(dueIn).toBeLessThanOrEqual(10 * 60 * 1000 + 5000);
+  });
+
+  it("telegram requested but never connected → email fires immediately", async () => {
+    await kv.put(kvEmailForClient(CLIENT_ID), "founder@example.com");
+    const before = Date.now();
+
+    const n = await request({ channels: ["telegram", "email"] });
+    expect(n).toEqual({ telegram: "not_connected", email: "immediate" });
+    expect(telegramCalls).toBe(0);
+    expect(Date.parse(escalationRow()?.due_at ?? "")).toBeLessThanOrEqual(before + 5000);
+  });
+
+  it("a failed telegram send also escalates immediately — failure is not delivery", async () => {
+    telegramStatus = 500;
+    await kv.put(kvChatForClient(CLIENT_ID), "777");
+    await kv.put(kvEmailForClient(CLIENT_ID), "founder@example.com");
+
+    const n = await request({ channels: ["telegram", "email"] });
+    expect(n).toEqual({ telegram: "failed", email: "immediate" });
+  });
+
+  it("email-only requests get the immediate email and the 4-hour default TTL", async () => {
+    await kv.put(kvEmailForClient(CLIENT_ID), "founder@example.com");
+    const result = await requestApproval(env, CLIENT_ID, { ...INPUT, channels: ["email"] });
+    const body = result.body as { expiresAt: string; notifications: ChannelDispatch };
+    expect(body.notifications.email).toBe("immediate");
+    expect(Date.parse(body.expiresAt) - Date.now()).toBeGreaterThan(3.9 * 60 * 60 * 1000);
+  });
+
+  it("no approver address configured → reported, nothing armed", async () => {
+    const n = await request({ channels: ["email"] });
+    expect(n.email).toBe("no_address");
+    expect(escalationRow()).toBeUndefined();
+  });
+
+  it("an approval expiring inside the escalation window never arms a dead email", async () => {
+    await kv.put(kvChatForClient(CLIENT_ID), "777");
+    await kv.put(kvEmailForClient(CLIENT_ID), "founder@example.com");
+    const n = await request({ channels: ["telegram", "email"], ttlSeconds: 300 });
+    expect(n).toEqual({ telegram: "sent", email: "expires_first" });
+    expect(escalationRow()).toBeUndefined();
+  });
+
+  it("missing channel bindings degrade to 'unconfigured' without blocking the approval", async () => {
+    env.TELEGRAM_BOT_TOKEN = undefined;
+    env.RESEND_API_KEY = undefined;
+    const n = await request({ channels: ["telegram", "email"] });
+    expect(n).toEqual({ telegram: "unconfigured", email: "unconfigured" });
   });
 });

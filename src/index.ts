@@ -13,7 +13,9 @@ import {
   sha256Hex,
   verifyAccessToken,
 } from "@/lib/m2m";
+import { isValidEmailShape, kvEmailForClient } from "@/lib/notify";
 import { RESERVED_EVENT_TYPE_PREFIX } from "@/lib/schema";
+import { CONNECT_CODE_TTL_SECONDS, generateConnectCode, kvConnectCode } from "@/lib/telegram";
 import type { Env } from "@/lib/types";
 import { MCP_TOOL_DEFINITIONS } from "@/mcp/tool-definitions";
 
@@ -377,6 +379,83 @@ app.post("/credentials/rotate", async (c) => {
     200,
     { "Cache-Control": "no-store" },
   );
+});
+
+// --- channel connect (D4) ---
+// Channel config is admin surface: an agent-scoped credential must not be able to point
+// approval traffic at an attacker's chat or inbox. Both endpoints write routing state to
+// CHANNELS_KV only — never the chain, never the DO.
+
+// Mints the one-time Telegram deep link. The tenant is auth.clientId — chosen by the
+// admin credential, so the /start redemption on the public worker never picks a tenant
+// from anything the Telegram user typed.
+app.post("/channels/telegram/connect", async (c) => {
+  const auth = await authenticate(c.req, c.env);
+  if (!auth.ok) return c.json({ error: auth.error, detail: auth.detail }, auth.status);
+  if (auth.scope !== "admin") {
+    return c.json(
+      { error: "insufficient_scope", detail: "Connecting channels requires the admin scope" },
+      403,
+    );
+  }
+  if (!c.env.CHANNELS_KV || !c.env.TELEGRAM_BOT_USERNAME) {
+    return c.json(
+      {
+        error: "channel_unconfigured",
+        detail: "CHANNELS_KV and TELEGRAM_BOT_USERNAME must be bound to connect Telegram",
+      },
+      503,
+    );
+  }
+
+  const code = generateConnectCode();
+  await c.env.CHANNELS_KV.put(kvConnectCode(code), auth.clientId, {
+    expirationTtl: CONNECT_CODE_TTL_SECONDS,
+  });
+  return c.json(
+    {
+      url: `https://t.me/${c.env.TELEGRAM_BOT_USERNAME}?start=${code}`,
+      expiresInSeconds: CONNECT_CODE_TTL_SECONDS,
+      note: "Open in Telegram and press Start. One-time use; connecting again replaces the bound chat.",
+    },
+    200,
+    { "Cache-Control": "no-store" },
+  );
+});
+
+// Sets the approver address for the email fallback channel. Overwrite-only in v1;
+// removal joins the admin surface (v1.5).
+app.post("/channels/email", async (c) => {
+  const auth = await authenticate(c.req, c.env);
+  if (!auth.ok) return c.json({ error: auth.error, detail: auth.detail }, auth.status);
+  if (auth.scope !== "admin") {
+    return c.json(
+      { error: "insufficient_scope", detail: "Connecting channels requires the admin scope" },
+      403,
+    );
+  }
+  if (!c.env.CHANNELS_KV) {
+    return c.json(
+      { error: "channel_unconfigured", detail: "CHANNELS_KV must be bound to configure email" },
+      503,
+    );
+  }
+
+  let address: unknown;
+  try {
+    address = ((await c.req.json()) as { address?: unknown }).address;
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  if (typeof address !== "string" || !isValidEmailShape(address)) {
+    return c.json(
+      { error: "invalid_address", detail: "address must be a plausible email address" },
+      400,
+    );
+  }
+
+  await c.env.CHANNELS_KV.put(kvEmailForClient(auth.clientId), address);
+  return c.json({ clientId: auth.clientId, address }, 200, { "Cache-Control": "no-store" });
 });
 
 // --- REST approval surface (D2: the production lane for M2M clients) ---

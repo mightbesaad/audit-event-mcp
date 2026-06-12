@@ -33,14 +33,37 @@ export function makeSqlStorage(db: DatabaseSync) {
   };
 }
 
-export function makeState(db: DatabaseSync): DurableObjectState {
+// Pass an alarms ref to observe what the DO scheduled; the default ref keeps existing
+// callers oblivious. Tests trigger firing by calling do_.alarm() directly.
+export function makeState(
+  db: DatabaseSync,
+  alarms: { current: number | null } = { current: null },
+): DurableObjectState {
   return {
     storage: {
       sql: makeSqlStorage(db),
-      getAlarm: async () => null,
-      setAlarm: async () => {},
+      getAlarm: async () => alarms.current,
+      setAlarm: async (t: number) => {
+        alarms.current = t;
+      },
     },
   } as unknown as DurableObjectState;
+}
+
+// Minimal CHANNELS_KV stand-in. expirationTtl is accepted and ignored — connect-code
+// expiry is covered by the one-time delete, not simulated clock decay.
+export function makeMockKV(): KVNamespace & { dump: () => Map<string, string> } {
+  const store = new Map<string, string>();
+  return {
+    get: async (key: string) => store.get(key) ?? null,
+    put: async (key: string, value: string) => {
+      store.set(key, value);
+    },
+    delete: async (key: string) => {
+      store.delete(key);
+    },
+    dump: () => store,
+  } as unknown as KVNamespace & { dump: () => Map<string, string> };
 }
 
 export function makeMockNotary(): Fetcher {

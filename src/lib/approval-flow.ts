@@ -1,5 +1,11 @@
 import type { ApprovalCreateResult, ApprovalRecord } from "@/lib/approval";
-import { isValidApprovalIdShape, isValidClientIdShape } from "@/lib/approval";
+import {
+  EMAIL_ESCALATION_DELAY_SECONDS,
+  isValidApprovalIdShape,
+  isValidClientIdShape,
+} from "@/lib/approval";
+import { kvEmailForClient } from "@/lib/notify";
+import { kvChatForClient, sendApprovalCard } from "@/lib/telegram";
 import { APPROVAL_LINK_GRACE_SECONDS, mintApprovalToken } from "@/lib/token";
 import type { Env, RecordResult } from "@/lib/types";
 import { deriveWebhookSecret } from "@/lib/webhook";
@@ -30,6 +36,96 @@ const REQUESTED_PURPOSE = "human oversight — approval requested (AI Act Art. 1
 // Public constant, not config: the production approve page lives on the go worker (D1).
 // Self-hosters point APPROVAL_LINK_BASE_URL at their own deployment.
 const DEFAULT_APPROVAL_LINK_BASE = "https://go.kajaril.com";
+
+// One mint path for every surface that hands a human the link (request_approval response,
+// telegram card, escalation email). The token's exp outlives the approval's expires_at by
+// the grace window (token.ts) so late clickers get a terminal-state page, not "invalid
+// link". Null when the secret is unbound — the approval still works via polling.
+export async function mintApprovalUrl(
+  env: Env,
+  clientId: string,
+  approvalId: string,
+  expiresAt: string,
+): Promise<string | null> {
+  if (!env.APPROVAL_TOKEN_SECRET) return null;
+  const base = (env.APPROVAL_LINK_BASE_URL ?? DEFAULT_APPROVAL_LINK_BASE).replace(/\/+$/, "");
+  const token = await mintApprovalToken(env.APPROVAL_TOKEN_SECRET, {
+    clientId,
+    approvalId,
+    exp: Math.floor(Date.parse(expiresAt) / 1000) + APPROVAL_LINK_GRACE_SECONDS,
+  });
+  return `${base}/a/${token}`;
+}
+
+// What request_approval reports about each requested channel (D4). Creation-response
+// fields are additive (webhookSecret set the precedent); the decision wire contract (D5)
+// is untouched. "push" stays unreported until the Web Push twin exists (v1.5).
+export interface ChannelDispatch {
+  telegram: "sent" | "failed" | "not_connected" | "unconfigured" | "not_requested";
+  email:
+    | "immediate"
+    | "scheduled"
+    | "expires_first"
+    | "no_address"
+    | "unconfigured"
+    | "arm_failed"
+    | "not_requested";
+}
+
+// Channel ladder dispatch (D4), awaited inline: the email decision needs to know whether
+// an instant channel actually reached someone, and an approval card that silently failed
+// to send would make the "sent" claim in the response a lie. Telegram failures degrade,
+// never block — the approval exists and polls fine regardless.
+async function dispatchChannels(
+  env: Env,
+  clientId: string,
+  record: ApprovalRecord,
+  approvalUrl: string | null,
+): Promise<ChannelDispatch> {
+  const dispatch: ChannelDispatch = { telegram: "not_requested", email: "not_requested" };
+
+  if (record.channels.includes("telegram")) {
+    if (!env.TELEGRAM_BOT_TOKEN || !env.CHANNELS_KV) {
+      dispatch.telegram = "unconfigured";
+    } else {
+      const chatId = await env.CHANNELS_KV.get(kvChatForClient(clientId));
+      dispatch.telegram = chatId
+        ? await sendApprovalCard(env.TELEGRAM_BOT_TOKEN, chatId, record, approvalUrl)
+        : "not_connected";
+    }
+  }
+
+  if (record.channels.includes("email")) {
+    if (!env.RESEND_API_KEY || !env.CHANNELS_KV) {
+      dispatch.email = "unconfigured";
+    } else {
+      const address = await env.CHANNELS_KV.get(kvEmailForClient(clientId));
+      if (!address) {
+        dispatch.email = "no_address";
+      } else {
+        // "Unacked" for v1 means undecided: a card the approver saw and is thinking about
+        // still escalates at 10 min — better a redundant email than a silent timeout.
+        const instant = dispatch.telegram === "sent";
+        const dueAtMs = instant ? Date.now() + EMAIL_ESCALATION_DELAY_SECONDS * 1000 : Date.now();
+        if (dueAtMs >= Date.parse(record.expiresAt)) {
+          dispatch.email = "expires_first";
+        } else {
+          const armRes = await tenantStub(env, clientId).fetch(
+            "https://do-internal/approval/arm-escalation",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ approvalId: record.id, clientId, emailTo: address, dueAtMs }),
+            },
+          );
+          dispatch.email = armRes.ok ? (instant ? "scheduled" : "immediate") : "arm_failed";
+        }
+      }
+    }
+  }
+
+  return dispatch;
+}
 
 export async function requestApproval(
   env: Env,
@@ -105,19 +201,12 @@ export async function requestApproval(
   }
   const chainEvent = (await recordRes.json()) as RecordResult;
 
-  // The link token's exp outlives the approval's expires_at by the grace window (see
-  // token.ts) so late clickers get a terminal-state page, not "invalid link". Null when
-  // the secret is unbound — same pattern as webhookSecret below; polling still works.
-  const approvalUrl = env.APPROVAL_TOKEN_SECRET
-    ? `${(env.APPROVAL_LINK_BASE_URL ?? DEFAULT_APPROVAL_LINK_BASE).replace(/\/+$/, "")}/a/${await mintApprovalToken(
-        env.APPROVAL_TOKEN_SECRET,
-        {
-          clientId,
-          approvalId: created.approvalId,
-          exp: Math.floor(Date.parse(created.expiresAt) / 1000) + APPROVAL_LINK_GRACE_SECONDS,
-        },
-      )}`
-    : null;
+  const approvalUrl = await mintApprovalUrl(env, clientId, created.approvalId, created.expiresAt);
+
+  // Channel ladder (D4): telegram card now, email escalation armed in the tenant DO.
+  // Runs after the chain event so a witnessed approval is never invisible to its approver
+  // only because a channel hiccuped — failures are reported, not thrown.
+  const notifications = await dispatchChannels(env, clientId, record, approvalUrl);
 
   return {
     status: 200,
@@ -127,6 +216,7 @@ export async function requestApproval(
       expiresAt: created.expiresAt,
       actionPayloadHash: record.actionPayloadHash,
       approvalUrl,
+      notifications,
       chainEvent,
       // D9 distribution channel: the per-tenant webhook verification secret travels in
       // every response so v1 needs no dashboard. Null when the master secret is unbound —
