@@ -83,6 +83,11 @@ export interface Env {
   AUDIT_PAYLOADS?: R2Bucket;
   NOTARY?: Fetcher;
   CF_ACCESS_TEAM_DOMAIN?: string;
+  // AUD tag of the one CF Access application protecting this worker (Day-4 pin, Day-3
+  // review): without it, a JWT minted for ANY Access app on the team domain verifies here,
+  // and that JWT now bootstraps admin credentials. Unset → CF Access auth fails closed (503),
+  // same as a missing team domain.
+  CF_ACCESS_APP_AUD?: string;
   // Cloudflare ratelimit binding (wrangler.jsonc "unsafe"): 30 approval creations/min per
   // tenant, gvnr's donor pattern. Optional so Node tests and self-hosters without the
   // binding run unlimited — absence fails open by design (it protects shared capacity,

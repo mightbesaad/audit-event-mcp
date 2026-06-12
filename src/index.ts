@@ -55,8 +55,15 @@ async function fetchJwks(teamDomain: string): Promise<CfJwk[]> {
 
 // Verifies a CF Access JWT against the team's published JWKS and returns the
 // custom.client_id claim, or null if verification fails for any reason.
-// Supports ES256 and RS256.
-export async function verifyJwt(jwt: string, teamDomain: string): Promise<string | null> {
+// Supports ES256 and RS256. The aud claim must name OUR Access application
+// (expectedAud): every app on the team domain shares the same signing keys, so
+// without the pin a token issued for some other app would verify here too.
+export async function verifyJwt(
+  jwt: string,
+  teamDomain: string,
+  expectedAud: string,
+): Promise<string | null> {
+  if (!expectedAud) return null;
   const parts = jwt.split(".");
   if (parts.length !== 3) return null;
   const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
@@ -74,6 +81,11 @@ export async function verifyJwt(jwt: string, teamDomain: string): Promise<string
   if (!alg || !kid) return null;
 
   if (typeof payload.exp === "number" && payload.exp < Date.now() / 1000) return null;
+
+  // CF Access encodes aud as an array of application AUD tags; tolerate a bare string.
+  const aud = payload.aud;
+  const audOk = Array.isArray(aud) ? aud.includes(expectedAud) : aud === expectedAud;
+  if (!audOk) return null;
 
   try {
     const keys = await fetchJwks(teamDomain);
@@ -138,15 +150,16 @@ async function authenticate(
 ): Promise<AuthOk | AuthFail> {
   const cfJwt = req.header("CF-Access-Jwt-Assertion");
   if (cfJwt) {
-    if (!env.CF_ACCESS_TEAM_DOMAIN) {
+    if (!env.CF_ACCESS_TEAM_DOMAIN || !env.CF_ACCESS_APP_AUD) {
       return {
         ok: false,
         status: 503,
         error: "Server misconfigured",
-        detail: "CF_ACCESS_TEAM_DOMAIN is not set; refusing to process unverified tokens",
+        detail:
+          "CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_APP_AUD must both be set; refusing to process unverified tokens",
       };
     }
-    const clientId = await verifyJwt(cfJwt, env.CF_ACCESS_TEAM_DOMAIN);
+    const clientId = await verifyJwt(cfJwt, env.CF_ACCESS_TEAM_DOMAIN, env.CF_ACCESS_APP_AUD);
     if (!clientId) {
       return { ok: false, status: 401, error: "Unauthorized", detail: "Invalid CF Access token" };
     }

@@ -17,6 +17,11 @@
   // With it unset, /mcp fails closed (503) instead of trusting an unverified token.
   "vars": {
     "CF_ACCESS_TEAM_DOMAIN": "aged-limit-247a.cloudflareaccess.com"
+    // CF_ACCESS_APP_AUD — DEPLOY DAY: set to the AUD tag of the Access application that
+    // protects audit-event.kajaril.com (Zero Trust dashboard → Access → Applications →
+    // Overview tab). Pins verifyJwt to OUR app: every app on the team domain shares the
+    // same signing keys, so an unpinned aud would accept tokens minted for any of them.
+    // Unset → CF Access auth fails closed (503).
     // APPROVAL_LINK_BASE_URL — optional override for where approval links point;
     // defaults in code to https://go.kajaril.com (the go worker, decision D1).
   },
