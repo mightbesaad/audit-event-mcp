@@ -13,7 +13,9 @@ import {
   sha256Hex,
   verifyAccessToken,
 } from "@/lib/m2m";
+import { isValidEmailShape, kvEmailForClient } from "@/lib/notify";
 import { RESERVED_EVENT_TYPE_PREFIX } from "@/lib/schema";
+import { CONNECT_CODE_TTL_SECONDS, generateConnectCode, kvConnectCode } from "@/lib/telegram";
 import type { Env } from "@/lib/types";
 import { MCP_TOOL_DEFINITIONS } from "@/mcp/tool-definitions";
 
@@ -55,8 +57,15 @@ async function fetchJwks(teamDomain: string): Promise<CfJwk[]> {
 
 // Verifies a CF Access JWT against the team's published JWKS and returns the
 // custom.client_id claim, or null if verification fails for any reason.
-// Supports ES256 and RS256.
-export async function verifyJwt(jwt: string, teamDomain: string): Promise<string | null> {
+// Supports ES256 and RS256. The aud claim must name OUR Access application
+// (expectedAud): every app on the team domain shares the same signing keys, so
+// without the pin a token issued for some other app would verify here too.
+export async function verifyJwt(
+  jwt: string,
+  teamDomain: string,
+  expectedAud: string,
+): Promise<string | null> {
+  if (!expectedAud) return null;
   const parts = jwt.split(".");
   if (parts.length !== 3) return null;
   const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
@@ -74,6 +83,11 @@ export async function verifyJwt(jwt: string, teamDomain: string): Promise<string
   if (!alg || !kid) return null;
 
   if (typeof payload.exp === "number" && payload.exp < Date.now() / 1000) return null;
+
+  // CF Access encodes aud as an array of application AUD tags; tolerate a bare string.
+  const aud = payload.aud;
+  const audOk = Array.isArray(aud) ? aud.includes(expectedAud) : aud === expectedAud;
+  if (!audOk) return null;
 
   try {
     const keys = await fetchJwks(teamDomain);
@@ -138,15 +152,16 @@ async function authenticate(
 ): Promise<AuthOk | AuthFail> {
   const cfJwt = req.header("CF-Access-Jwt-Assertion");
   if (cfJwt) {
-    if (!env.CF_ACCESS_TEAM_DOMAIN) {
+    if (!env.CF_ACCESS_TEAM_DOMAIN || !env.CF_ACCESS_APP_AUD) {
       return {
         ok: false,
         status: 503,
         error: "Server misconfigured",
-        detail: "CF_ACCESS_TEAM_DOMAIN is not set; refusing to process unverified tokens",
+        detail:
+          "CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_APP_AUD must both be set; refusing to process unverified tokens",
       };
     }
-    const clientId = await verifyJwt(cfJwt, env.CF_ACCESS_TEAM_DOMAIN);
+    const clientId = await verifyJwt(cfJwt, env.CF_ACCESS_TEAM_DOMAIN, env.CF_ACCESS_APP_AUD);
     if (!clientId) {
       return { ok: false, status: 401, error: "Unauthorized", detail: "Invalid CF Access token" };
     }
@@ -364,6 +379,83 @@ app.post("/credentials/rotate", async (c) => {
     200,
     { "Cache-Control": "no-store" },
   );
+});
+
+// --- channel connect (D4) ---
+// Channel config is admin surface: an agent-scoped credential must not be able to point
+// approval traffic at an attacker's chat or inbox. Both endpoints write routing state to
+// CHANNELS_KV only — never the chain, never the DO.
+
+// Mints the one-time Telegram deep link. The tenant is auth.clientId — chosen by the
+// admin credential, so the /start redemption on the public worker never picks a tenant
+// from anything the Telegram user typed.
+app.post("/channels/telegram/connect", async (c) => {
+  const auth = await authenticate(c.req, c.env);
+  if (!auth.ok) return c.json({ error: auth.error, detail: auth.detail }, auth.status);
+  if (auth.scope !== "admin") {
+    return c.json(
+      { error: "insufficient_scope", detail: "Connecting channels requires the admin scope" },
+      403,
+    );
+  }
+  if (!c.env.CHANNELS_KV || !c.env.TELEGRAM_BOT_USERNAME) {
+    return c.json(
+      {
+        error: "channel_unconfigured",
+        detail: "CHANNELS_KV and TELEGRAM_BOT_USERNAME must be bound to connect Telegram",
+      },
+      503,
+    );
+  }
+
+  const code = generateConnectCode();
+  await c.env.CHANNELS_KV.put(kvConnectCode(code), auth.clientId, {
+    expirationTtl: CONNECT_CODE_TTL_SECONDS,
+  });
+  return c.json(
+    {
+      url: `https://t.me/${c.env.TELEGRAM_BOT_USERNAME}?start=${code}`,
+      expiresInSeconds: CONNECT_CODE_TTL_SECONDS,
+      note: "Open in Telegram and press Start. One-time use; connecting again replaces the bound chat.",
+    },
+    200,
+    { "Cache-Control": "no-store" },
+  );
+});
+
+// Sets the approver address for the email fallback channel. Overwrite-only in v1;
+// removal joins the admin surface (v1.5).
+app.post("/channels/email", async (c) => {
+  const auth = await authenticate(c.req, c.env);
+  if (!auth.ok) return c.json({ error: auth.error, detail: auth.detail }, auth.status);
+  if (auth.scope !== "admin") {
+    return c.json(
+      { error: "insufficient_scope", detail: "Connecting channels requires the admin scope" },
+      403,
+    );
+  }
+  if (!c.env.CHANNELS_KV) {
+    return c.json(
+      { error: "channel_unconfigured", detail: "CHANNELS_KV must be bound to configure email" },
+      503,
+    );
+  }
+
+  let address: unknown;
+  try {
+    address = ((await c.req.json()) as { address?: unknown }).address;
+  } catch {
+    return c.json({ error: "invalid_json" }, 400);
+  }
+  if (typeof address !== "string" || !isValidEmailShape(address)) {
+    return c.json(
+      { error: "invalid_address", detail: "address must be a plausible email address" },
+      400,
+    );
+  }
+
+  await c.env.CHANNELS_KV.put(kvEmailForClient(auth.clientId), address);
+  return c.json({ clientId: auth.clientId, address }, 200, { "Cache-Control": "no-store" });
 });
 
 // --- REST approval surface (D2: the production lane for M2M clients) ---

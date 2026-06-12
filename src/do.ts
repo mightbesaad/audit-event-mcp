@@ -8,9 +8,11 @@ import {
   defaultTtlSeconds,
   generateApprovalId,
   isValidApprovalIdShape,
+  isValidClientIdShape,
   MAX_ACTION_PAYLOAD_CHARS,
   statusOnRead,
 } from "@/lib/approval";
+import { mintApprovalUrl } from "@/lib/approval-flow";
 import {
   canonicalJson,
   computeActionPayloadHash,
@@ -18,6 +20,7 @@ import {
   computeInputHash,
 } from "@/lib/hash";
 import { isM2MScope } from "@/lib/m2m";
+import { isValidEmailShape, sendApprovalEmail } from "@/lib/notify";
 import {
   ApprovalCreateRequestSchema,
   ApprovalDecideRequestSchema,
@@ -115,6 +118,20 @@ CREATE TABLE IF NOT EXISTS credentials (
   created_at   TEXT NOT NULL,
   rotated_at   TEXT
 );
+
+-- Email-fallback escalations (D4, Day 4, pre-first-deploy): at most one per approval,
+-- armed by the worker flow at request time, fired by this DO's alarm. due_at/fired_at are
+-- ISO-8601 like every other timestamp here (lexicographic compare works). client_id is
+-- redundant with the DO's own name but stored so firing needs no name parsing. Expiry
+-- itself stays computed-on-read (D3) — this alarm exists only to SEND, never to decide.
+CREATE TABLE IF NOT EXISTS escalations (
+  approval_id  TEXT PRIMARY KEY,
+  client_id    TEXT NOT NULL,
+  email_to     TEXT NOT NULL,
+  due_at       TEXT NOT NULL,
+  fired_at     TEXT,
+  result       TEXT
+);
 `;
 
 export class AuditDO implements DurableObject {
@@ -142,6 +159,8 @@ export class AuditDO implements DurableObject {
       return this.handleApprovalGet(request);
     if (request.method === "POST" && url.pathname === "/approval/decide")
       return this.handleApprovalDecide(request);
+    if (request.method === "POST" && url.pathname === "/approval/arm-escalation")
+      return this.handleArmEscalation(request);
     if (request.method === "POST" && url.pathname === "/credential/set")
       return this.handleCredentialSet(request);
     if (request.method === "POST" && url.pathname === "/credential/get")
@@ -337,9 +356,14 @@ export class AuditDO implements DurableObject {
     return Response.json({ events: rows, count: rows.length });
   }
 
-  // Called by CF runtime when the scheduled alarm fires — flushes all pending events.
+  // Called by CF runtime when the scheduled alarm fires. One alarm serves two jobs
+  // (a DO has exactly one): notarization flush and email escalations. Running the notary
+  // early because an escalation pulled the alarm forward is harmless — it just signs
+  // whatever is pending.
   async alarm(): Promise<void> {
     await this.notarizePending();
+    await this.processDueEscalations();
+    await this.armNextEscalationAlarm();
   }
 
   private async scheduleAlarmIfNeeded(): Promise<void> {
@@ -558,6 +582,114 @@ export class AuditDO implements DurableObject {
     }
     const result: DecideResult = { ok: true, record: this.approvalRowToRecord(updated) };
     return Response.json(result);
+  }
+
+  // --- email escalation (decision D4) ---
+  // The flow layer arms at request time (it alone knows whether an instant channel
+  // delivered); this DO owns WHEN to fire and the still-pending re-check at fire time.
+  // Callers are trusted workers — these internal routes are reachable only via the stub.
+
+  private async handleArmEscalation(request: Request): Promise<Response> {
+    const raw = (await request.json()) as {
+      approvalId?: unknown;
+      clientId?: unknown;
+      emailTo?: unknown;
+      dueAtMs?: unknown;
+    };
+    if (typeof raw.approvalId !== "string" || !isValidApprovalIdShape(raw.approvalId)) {
+      return Response.json({ error: "invalid approvalId" }, { status: 400 });
+    }
+    if (typeof raw.clientId !== "string" || !isValidClientIdShape(raw.clientId)) {
+      return Response.json({ error: "invalid clientId" }, { status: 400 });
+    }
+    if (typeof raw.emailTo !== "string" || !isValidEmailShape(raw.emailTo)) {
+      return Response.json({ error: "invalid emailTo" }, { status: 400 });
+    }
+    if (typeof raw.dueAtMs !== "number" || !Number.isInteger(raw.dueAtMs) || raw.dueAtMs <= 0) {
+      return Response.json({ error: "invalid dueAtMs" }, { status: 400 });
+    }
+
+    const row = this.readApprovalRow(raw.approvalId);
+    if (!row) return Response.json({ error: "approval_not_found" }, { status: 404 });
+    if (statusOnRead(row.status as ApprovalStatus, row.expires_at, Date.now()) !== "pending") {
+      return Response.json({ error: "not_pending" }, { status: 409 });
+    }
+
+    const dueAt = new Date(raw.dueAtMs).toISOString();
+    this.sql.exec(
+      `INSERT INTO escalations (approval_id, client_id, email_to, due_at, fired_at, result)
+       VALUES (?,?,?,?,NULL,NULL)
+       ON CONFLICT(approval_id) DO UPDATE SET email_to = excluded.email_to,
+                                              due_at = excluded.due_at`,
+      raw.approvalId,
+      raw.clientId,
+      raw.emailTo,
+      dueAt,
+    );
+    await this.armAlarmAt(raw.dueAtMs);
+    return Response.json({ armed: true, dueAt });
+  }
+
+  // Single attempt per escalation, mirroring the decision webhook: the row records the
+  // outcome and is never retried (outbox is v1.5, DEFERRED.md). 'superseded' means the
+  // approval was decided or expired before the email was due — the happy path.
+  private async processDueEscalations(): Promise<void> {
+    const due = this.sql
+      .exec<{ approval_id: string; client_id: string; email_to: string }>(
+        "SELECT approval_id, client_id, email_to FROM escalations WHERE fired_at IS NULL AND due_at <= ?",
+        new Date().toISOString(),
+      )
+      .toArray();
+
+    for (const esc of due) {
+      let result = "superseded";
+      const row = this.readApprovalRow(esc.approval_id);
+      if (
+        row &&
+        statusOnRead(row.status as ApprovalStatus, row.expires_at, Date.now()) === "pending"
+      ) {
+        const record = this.approvalRowToRecord(row);
+        const approvalUrl = await mintApprovalUrl(
+          this.env,
+          esc.client_id,
+          record.id,
+          record.expiresAt,
+        );
+        if (!approvalUrl) {
+          // Same fail-closed posture as the unsigned webhook: an approval email whose only
+          // job is the decide link is not sent without one.
+          result = "skipped_no_link";
+        } else {
+          result = (
+            await sendApprovalEmail(this.env.RESEND_API_KEY, esc.email_to, record, approvalUrl)
+          ).status;
+        }
+      }
+      this.sql.exec(
+        "UPDATE escalations SET fired_at = ?, result = ? WHERE approval_id = ?",
+        new Date().toISOString(),
+        result,
+        esc.approval_id,
+      );
+    }
+  }
+
+  private async armNextEscalationAlarm(): Promise<void> {
+    const next = this.sql
+      .exec<{ due_at: string }>(
+        "SELECT due_at FROM escalations WHERE fired_at IS NULL ORDER BY due_at ASC LIMIT 1",
+      )
+      .toArray()[0];
+    if (!next) return;
+    await this.armAlarmAt(Date.parse(next.due_at));
+  }
+
+  // Pull the single alarm earlier when needed; never push it later — the notary's 15-min
+  // cadence (scheduleAlarmIfNeeded) keeps its slot when it is already sooner.
+  private async armAlarmAt(tMs: number): Promise<void> {
+    const existing = await this.state.storage.getAlarm?.();
+    if (existing !== null && existing !== undefined && existing <= tMs) return;
+    await this.state.storage.setAlarm?.(Math.max(tMs, Date.now()));
   }
 
   // --- M2M credentials (decision D2) ---

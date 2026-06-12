@@ -125,6 +125,8 @@ export const MCP_TOOL_DEFINITIONS = [
           type: "array",
           maxItems: 4,
           items: { type: "string", enum: ["telegram", "push", "email"] },
+          description:
+            "How the approver is notified. telegram needs a connected chat, email a configured address (admin: POST /channels/telegram/connect, /channels/email); the response's notifications field reports what was delivered. push is reserved.",
         },
         callbackUrl: {
           type: "string",

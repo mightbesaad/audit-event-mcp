@@ -1,6 +1,12 @@
 import { Hono } from "hono";
 import type { ApprovalRecord } from "@/lib/approval";
 import { MAX_REASON_CHARS } from "@/lib/approval";
+import {
+  constantTimeEqualString,
+  processTelegramUpdate,
+  TELEGRAM_SECRET_TOKEN_HEADER,
+  type TelegramUpdate,
+} from "@/lib/telegram";
 import { verifyApprovalToken } from "@/lib/token";
 import type { GoEnv } from "@/lib/types";
 
@@ -175,6 +181,41 @@ function misconfigured(): Response {
 
 app.get("/health", (c) => {
   return c.json({ status: "ok", product: "go-kajaril", version: "0.1.0" });
+});
+
+// Telegram callback webhook (D4). Registered with setWebhook + our secret_token; the
+// header echo is the only proof an update came from Telegram, checked in constant time
+// before anything is parsed. Inside, tenant selection follows the same law as /a/:token:
+// never user input — the chat→tenant binding written during the admin-minted connect
+// flow, with decisions going through ApprovalInternal (get/decide only, unwidened).
+app.post("/tg/webhook", async (c) => {
+  if (!c.env.TELEGRAM_WEBHOOK_SECRET || !c.env.TELEGRAM_BOT_TOKEN || !c.env.CHANNELS_KV) {
+    return c.json(
+      {
+        error: "Server misconfigured",
+        detail: "TELEGRAM_WEBHOOK_SECRET, TELEGRAM_BOT_TOKEN and CHANNELS_KV must all be bound",
+      },
+      503,
+    );
+  }
+  const presented = c.req.header(TELEGRAM_SECRET_TOKEN_HEADER) ?? "";
+  if (!constantTimeEqualString(presented, c.env.TELEGRAM_WEBHOOK_SECRET)) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  let update: TelegramUpdate;
+  try {
+    update = (await c.req.json()) as TelegramUpdate;
+  } catch {
+    // Authenticated but unparseable — acknowledge so Telegram does not redeliver garbage.
+    return c.json({ ok: true });
+  }
+
+  await processTelegramUpdate(
+    { audit: c.env.AUDIT, kv: c.env.CHANNELS_KV, botToken: c.env.TELEGRAM_BOT_TOKEN },
+    update,
+  );
+  return c.json({ ok: true });
 });
 
 app.get("/a/:token", async (c) => {

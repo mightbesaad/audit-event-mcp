@@ -4,7 +4,7 @@ v1 scope is locked (witness draft §5). Anything that felt necessary mid-build b
 the v1 list lands here with enough context to pick it up cold. Reordering happens after buyer
 conversations, not before.
 
-## Webhook delivery retries / witnessed-event outbox (Day 2)
+## Webhook delivery retries / witnessed-event outbox (Day 2; scope widened Day 4)
 
 v1 sends the decision webhook once, fire-and-forget, and emits chain events with a single
 synchronous `/record` call. If the DO refuses the `approval.decided` record or the customer's
@@ -12,6 +12,35 @@ endpoint is down, we log loudly and move on — the decision itself is already c
 polling still resolves the approval. The robust version is an outbox in the tenant DO drained
 by alarms (retry webhook deliveries with backoff; re-attempt failed chain-event emission).
 Do not build before someone actually loses a delivery they cared about.
+
+Day 4 added two more single-attempt sends in the same posture: the Telegram approval card
+(failure degrades to the email rung — `notifications.telegram: "failed"` plus an immediate
+escalation) and the escalation email itself (the DO marks the escalations row
+`result: "failed"` and never retries). If retries ever get built, all three belong in the one
+outbox — no channel gets its own bespoke retry loop.
+
+## Channel management surface (Day 4)
+
+v1 channel config is write-only: connecting Telegram again replaces the bound chat,
+POST /channels/email overwrites the address, and nothing lists or disconnects. The moment a
+tenant asks "which chat is this bound to?" the shape is GET /channels + DELETE per channel —
+bundle it with the admin surface (same v1.5 bundle as per-tenant webhook-secret rotation).
+
+## Multi-approver / multi-chat per tenant (Day 4)
+
+One Telegram chat and one approver address per tenant, by design — the v1 buyer IS the
+approver. Group chats already work (bind the group; anyone in it can decide, responder_id
+records who), but real multi-approver semantics (quorum, delegation, per-agent routing) are
+a v1.5 verbs question (witness draft D5), not a channels question. Park until a buyer
+describes their team.
+
+## Real ack signals for the escalation window (Day 4)
+
+"Unacked after 10 min" is implemented as "undecided after 10 min" — Telegram delivery is
+treated as reaching a human. Telegram offers no read receipts for bots, so a truer ack would
+need an explicit "I'm looking at it" button (an extended-pending state ≈ snooze, reserved in
+D5 as a v1.5 verb). A redundant email to someone already deciding costs nothing; do not build
+ack plumbing before someone complains about the noise.
 
 ## Recorder attestation source for approval.* events (v1.5 design question)
 

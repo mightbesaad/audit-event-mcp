@@ -19,9 +19,23 @@
       "entrypoint": "ApprovalInternal"
     }
   ],
+  // CHANNELS_KV — DEPLOY DAY: bind the SAME namespace created for the gated worker
+  // (see wrangler.jsonc). The /tg/webhook handler resolves chat → tenant bindings and
+  // redeems one-time connect codes here. Unset → /tg/webhook fails closed (503).
+  // "kv_namespaces": [{ "binding": "CHANNELS_KV", "id": "<same id as wrangler.jsonc>" }],
   // Secrets (wrangler secret put --config wrangler.go.jsonc):
   //   APPROVAL_TOKEN_SECRET — HMAC key for approval link tokens. The worker fails closed
   //   (503) when unset. High-entropy random string; rotation invalidates outstanding links.
+  //   TELEGRAM_BOT_TOKEN — same @BotFather token as the gated worker's secret: this side
+  //   answers callbacks, sends reason prompts, and edits decided cards.
+  //   TELEGRAM_WEBHOOK_SECRET — OUR high-entropy random value, registered with Telegram
+  //   so it echoes it back on every webhook delivery. DEPLOY DAY (after both secrets):
+  //     curl -s https://api.telegram.org/bot<TOKEN>/setWebhook \
+  //       -d url=https://go.kajaril.com/tg/webhook \
+  //       -d secret_token=<TELEGRAM_WEBHOOK_SECRET> \
+  //       -d 'allowed_updates=["message","callback_query"]'
+  //   Also confirm the bot's public name/about are kajaril-appropriate (Day-0 note: it
+  //   started life as a gvnr ops bot).
   "observability": {
     "enabled": true
   },

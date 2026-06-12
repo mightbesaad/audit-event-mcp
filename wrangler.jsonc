@@ -17,9 +17,24 @@
   // With it unset, /mcp fails closed (503) instead of trusting an unverified token.
   "vars": {
     "CF_ACCESS_TEAM_DOMAIN": "aged-limit-247a.cloudflareaccess.com"
+    // CF_ACCESS_APP_AUD — DEPLOY DAY: set to the AUD tag of the Access application that
+    // protects audit-event.kajaril.com (Zero Trust dashboard → Access → Applications →
+    // Overview tab). Pins verifyJwt to OUR app: every app on the team domain shares the
+    // same signing keys, so an unpinned aud would accept tokens minted for any of them.
+    // Unset → CF Access auth fails closed (503).
     // APPROVAL_LINK_BASE_URL — optional override for where approval links point;
     // defaults in code to https://go.kajaril.com (the go worker, decision D1).
+    // TELEGRAM_BOT_USERNAME — DEPLOY DAY: the bot's public @username (no @), used to build
+    // t.me connect deep links. Public information, hence a var. Unset → POST
+    // /channels/telegram/connect returns 503.
   },
+  // CHANNELS_KV — channel routing config (D4): telegram connect codes + chat bindings and
+  // the approver email. Routing state only, never evidence. The SAME namespace must be
+  // bound to the go worker (wrangler.go.jsonc) — its Telegram webhook resolves chat →
+  // tenant here. DEPLOY DAY:
+  //   npx wrangler kv namespace create CHANNELS_KV
+  // then uncomment with the printed id, mirroring it into wrangler.go.jsonc:
+  // "kv_namespaces": [{ "binding": "CHANNELS_KV", "id": "<from create command>" }],
   // DO namespace created implicitly on first `wrangler deploy` — no separate CLI command needed.
   "durable_objects": {
     "bindings": [
@@ -74,6 +89,13 @@
   //   (D2). High-entropy random string. Unset → /oauth/token and Bearer auth fail closed
   //   (503). Rotation invalidates every outstanding access token (clients re-auth within
   //   the hour); client secrets are unaffected (hashes live in each tenant's DO).
+  //   TELEGRAM_BOT_TOKEN — @BotFather token (D4); this worker sends approval cards with
+  //   it. The SAME value goes to the go worker's secret of the same name (it answers
+  //   callbacks and edits cards). Unset → telegram dispatch reports "unconfigured".
+  //   RESEND_API_KEY — Resend key for the email fallback (D4); read by the tenant DO when
+  //   an escalation alarm fires. Sender identity is pinned in code to
+  //   approvals@send.kajaril.com (verified subdomain, EU region) — never the root domain.
+  //   Unset → email dispatch reports "unconfigured" / escalations record skipped.
   "observability": {
     "enabled": true
   },

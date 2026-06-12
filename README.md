@@ -197,6 +197,43 @@ Self-hosting note: webhook signing derives per-tenant secrets from the `WEBHOOK_
 Workers Secret. If it is unset, webhooks are not sent at all (never unsigned) and
 `request_approval` returns `webhookSecret: null`; polling still works.
 
+## Notification channels
+
+`request_approval` accepts `channels: ["telegram", "email"]` and notifies the approver over a
+ladder: instant first, email as the fallback.
+
+**Telegram (instant).** Connect once — `POST /channels/telegram/connect` (admin scope) returns a
+one-time `t.me` deep link (15-minute expiry). Open it, press Start, and approval cards arrive in
+that chat with inline **Approve** / **Deny** / **Deny with reason** buttons. Deny-with-reason
+prompts for a short reply that is recorded with the decision — stronger Art. 14 evidence than a
+binary stamp. Connecting again replaces the bound chat.
+
+**Email (fallback).** Set the approver address once — `POST /channels/email` (admin scope) with
+`{"address": "…"}`. The email fires only when it is needed:
+
+- immediately, if no instant channel delivered (not connected, send failed, or not requested);
+- after 10 minutes, if an instant card was delivered but the approval is still undecided;
+- never, if the approval would expire before the email could matter.
+
+Mail is sent from `approvals@send.kajaril.com` with the decide link; replies reach a human via
+`studio@kajaril.com`.
+
+**Dispatch report.** Every `request_approval` response includes what actually happened:
+
+```json
+"notifications": { "telegram": "sent", "email": "scheduled" }
+```
+
+(`telegram`: `sent | failed | not_connected | unconfigured | not_requested`; `email`:
+`immediate | scheduled | expires_first | no_address | unconfigured | arm_failed | not_requested`.)
+
+TTL defaults follow the channels: 30 minutes when an instant channel is in play, 4 hours when
+the request is email-only, explicit `ttlSeconds` always wins.
+
+Self-hosting note: channels are optional. Without `TELEGRAM_BOT_TOKEN` / `RESEND_API_KEY` /
+`CHANNELS_KV`, dispatch reports `unconfigured` and the approval still works through
+`approvalUrl` + polling. The bindings are documented in `wrangler.jsonc` and `wrangler.go.jsonc`.
+
 ## Lawful basis (GDPR Art. 6)
 
 ```
