@@ -17,6 +17,7 @@ import {
   computeChainHash,
   computeInputHash,
 } from "@/lib/hash";
+import { isM2MScope } from "@/lib/m2m";
 import {
   ApprovalCreateRequestSchema,
   ApprovalDecideRequestSchema,
@@ -104,6 +105,16 @@ CREATE TABLE IF NOT EXISTS approvals (
   escalated_to         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+
+-- M2M client-credential hashes (decision D2): one row per scope, plaintext never stored.
+-- The tenant's own DO is the registry — no cross-tenant credential store to leak or migrate,
+-- and rotating one tenant's scope never touches anyone else. Added Day 3, pre-first-deploy.
+CREATE TABLE IF NOT EXISTS credentials (
+  scope        TEXT PRIMARY KEY CHECK (scope IN ('agent','admin')),
+  secret_hash  TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  rotated_at   TEXT
+);
 `;
 
 export class AuditDO implements DurableObject {
@@ -131,6 +142,10 @@ export class AuditDO implements DurableObject {
       return this.handleApprovalGet(request);
     if (request.method === "POST" && url.pathname === "/approval/decide")
       return this.handleApprovalDecide(request);
+    if (request.method === "POST" && url.pathname === "/credential/set")
+      return this.handleCredentialSet(request);
+    if (request.method === "POST" && url.pathname === "/credential/get")
+      return this.handleCredentialGet(request);
     return Response.json({ error: "Not Found" }, { status: 404 });
   }
 
@@ -543,6 +558,48 @@ export class AuditDO implements DurableObject {
     }
     const result: DecideResult = { ok: true, record: this.approvalRowToRecord(updated) };
     return Response.json(result);
+  }
+
+  // --- M2M credentials (decision D2) ---
+  // The worker generates the secret and hashes it; only the hash ever reaches the DO. The
+  // UPSERT keeps created_at from the first issue and stamps rotated_at on every later one,
+  // so the row itself documents rotation history's two endpoints.
+
+  private async handleCredentialSet(request: Request): Promise<Response> {
+    const raw = (await request.json()) as { scope?: unknown; secretHash?: unknown };
+    if (!isM2MScope(raw.scope)) {
+      return Response.json({ error: "scope must be 'agent' or 'admin'" }, { status: 400 });
+    }
+    if (typeof raw.secretHash !== "string" || !/^[0-9a-f]{64}$/.test(raw.secretHash)) {
+      return Response.json({ error: "secretHash must be SHA-256 hex" }, { status: 400 });
+    }
+    const now = new Date().toISOString();
+    this.sql.exec(
+      `INSERT INTO credentials (scope, secret_hash, created_at, rotated_at)
+       VALUES (?,?,?,NULL)
+       ON CONFLICT(scope) DO UPDATE SET secret_hash = excluded.secret_hash,
+                                        rotated_at = excluded.created_at`,
+      raw.scope,
+      raw.secretHash,
+      now,
+    );
+    return Response.json({ scope: raw.scope, setAt: now });
+  }
+
+  private async handleCredentialGet(request: Request): Promise<Response> {
+    const raw = (await request.json()) as { scope?: unknown };
+    if (!isM2MScope(raw.scope)) {
+      return Response.json({ error: "scope must be 'agent' or 'admin'" }, { status: 400 });
+    }
+    const rows = this.sql
+      .exec<{ secret_hash: string }>(
+        "SELECT secret_hash FROM credentials WHERE scope = ?",
+        raw.scope,
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return Response.json({ error: "credential_not_found" }, { status: 404 });
+    return Response.json({ secretHash: row.secret_hash });
   }
 
   private async handleDossier(request: Request): Promise<Response> {

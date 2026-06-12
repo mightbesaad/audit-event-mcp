@@ -1,5 +1,6 @@
 import type { ApprovalCreateResult, ApprovalRecord } from "@/lib/approval";
-import { isValidClientIdShape } from "@/lib/approval";
+import { isValidApprovalIdShape, isValidClientIdShape } from "@/lib/approval";
+import { APPROVAL_LINK_GRACE_SECONDS, mintApprovalToken } from "@/lib/token";
 import type { Env, RecordResult } from "@/lib/types";
 import { deriveWebhookSecret } from "@/lib/webhook";
 
@@ -25,6 +26,10 @@ export function tenantStub(env: Env, clientId: string): DurableObjectStub {
 }
 
 const REQUESTED_PURPOSE = "human oversight — approval requested (AI Act Art. 14)";
+
+// Public constant, not config: the production approve page lives on the go worker (D1).
+// Self-hosters point APPROVAL_LINK_BASE_URL at their own deployment.
+const DEFAULT_APPROVAL_LINK_BASE = "https://go.kajaril.com";
 
 export async function requestApproval(
   env: Env,
@@ -100,6 +105,20 @@ export async function requestApproval(
   }
   const chainEvent = (await recordRes.json()) as RecordResult;
 
+  // The link token's exp outlives the approval's expires_at by the grace window (see
+  // token.ts) so late clickers get a terminal-state page, not "invalid link". Null when
+  // the secret is unbound — same pattern as webhookSecret below; polling still works.
+  const approvalUrl = env.APPROVAL_TOKEN_SECRET
+    ? `${(env.APPROVAL_LINK_BASE_URL ?? DEFAULT_APPROVAL_LINK_BASE).replace(/\/+$/, "")}/a/${await mintApprovalToken(
+        env.APPROVAL_TOKEN_SECRET,
+        {
+          clientId,
+          approvalId: created.approvalId,
+          exp: Math.floor(Date.parse(created.expiresAt) / 1000) + APPROVAL_LINK_GRACE_SECONDS,
+        },
+      )}`
+    : null;
+
   return {
     status: 200,
     body: {
@@ -107,6 +126,7 @@ export async function requestApproval(
       status: record.status,
       expiresAt: created.expiresAt,
       actionPayloadHash: record.actionPayloadHash,
+      approvalUrl,
       chainEvent,
       // D9 distribution channel: the per-tenant webhook verification secret travels in
       // every response so v1 needs no dashboard. Null when the master secret is unbound —
@@ -114,6 +134,53 @@ export async function requestApproval(
       webhookSecret: env.WEBHOOK_SIGNING_SECRET
         ? await deriveWebhookSecret(env.WEBHOOK_SIGNING_SECRET, clientId)
         : null,
+    },
+  };
+}
+
+// Worker-layer check_approval flow: reads via the tenant stub and the DO's /approval/get —
+// deliberately NOT via ApprovalInternal, whose get/decide surface belongs to the go worker
+// alone and must not widen. Status is computed on read by the DO, so 'timeout' appears here
+// the moment expires_at passes. The poll body is the narrow wire contract (D5) plus the
+// fields needed to display/verify the decision — never callbackUrl or channel internals.
+export async function checkApproval(
+  env: Env,
+  clientId: string,
+  approvalId: string,
+): Promise<FlowResult> {
+  if (!isValidClientIdShape(clientId)) {
+    return { status: 400, body: { error: "invalid_client" } };
+  }
+  // Malformed ids can't exist, so they are indistinguishable from absent ones.
+  if (!isValidApprovalIdShape(approvalId)) {
+    return { status: 404, body: { error: "approval_not_found" } };
+  }
+
+  const res = await tenantStub(env, clientId).fetch("https://do-internal/approval/get", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approvalId }),
+  });
+  if (res.status === 400 || res.status === 404) {
+    return { status: 404, body: { error: "approval_not_found" } };
+  }
+  if (!res.ok) {
+    return { status: 500, body: { error: "approval_get_failed" } };
+  }
+  const record = (await res.json()) as ApprovalRecord;
+
+  return {
+    status: 200,
+    body: {
+      approvalId: record.id,
+      status: record.status,
+      reason: record.reason,
+      responderId: record.responderId,
+      actionSummary: record.actionSummary,
+      actionPayloadHash: record.actionPayloadHash,
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+      decidedAt: record.decidedAt,
     },
   };
 }

@@ -130,4 +130,13 @@ console.log(`
        curl https://audit-event.kajaril.com/health \\
             -H 'CF-Access-Client-Id: <client_id>' \\
             -H 'CF-Access-Client-Secret: <client_secret>'
+  6. (Optional — M2M / REST clients) Mint scoped OAuth credentials with the service token;
+     the Access-verified JWT authorizes the bootstrap:
+       curl -X POST https://audit-event.kajaril.com/credentials/rotate \\
+            -H 'CF-Access-Client-Id: <client_id>' \\
+            -H 'CF-Access-Client-Secret: <client_secret>' \\
+            -H 'Content-Type: application/json' \\
+            -d '{"scope":"agent"}'
+     The clientSecret in the response is shown exactly once — hand it over securely.
+     Repeat with {"scope":"admin"} if the client manages its own rotation.
 `);
