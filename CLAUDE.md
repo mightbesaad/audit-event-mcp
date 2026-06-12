@@ -97,6 +97,7 @@ Do not read or write outside the repo root without an explicit ask.
 | Witness Day 1: approvals in AuditDO, HMAC link tokens, go.kajaril.com worker + approve page | done | 2026-06-11 — see kajaril-witness-integration-draft.md §3; not yet deployed |
 | Witness Day 2: approval.requested/decided chain events, action-payload hashing (D6), signed decision webhook (D9), per-channel TTL, rate limiter | done | 2026-06-12 — webhook-secret design recorded as D9 in the draft; not yet deployed |
 | Witness Day 3: M2M client-credentials auth (hand-rolled, D2/D10), tool dispatch 4→6, REST approval surface, approval_url minting | done | 2026-06-12 — credential-storage design recorded as D10 in the draft; workers-oauth-provider pinned 0.7.2 exact (PR #30, founder-approved security-fix override of the 2-week quarantine); browser-flow wiring pending; not yet deployed |
+| Witness Day 4: CF Access aud pin; channel ladder (D4) — Telegram cards + callbacks + deny-with-reason, one-time connect deep links, Resend email escalation via DO alarm, CHANNELS_KV routing config | done | 2026-06-12 — all Telegram/Resend coverage synthetic, live E2E is deploy day; deploy-day steps in both wrangler configs (KV namespace, 3 new secrets, bot username var, CF_ACCESS_APP_AUD, setWebhook); browser-flow endpoint-ownership decision still pending; not yet deployed |
 
 Update this table as milestones close.
 
