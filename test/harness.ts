@@ -88,6 +88,19 @@ export function makeMockR2(): R2Bucket {
       store.set(key, { body: String(value), customMetadata: options?.customMetadata });
       return {} as R2Object;
     },
+    // get/delete added Day 5 for DossierInternal — text() + customMetadata are all it reads.
+    async get(key: string) {
+      const entry = store.get(key);
+      if (!entry) return null;
+      return {
+        body: entry.body,
+        customMetadata: entry.customMetadata,
+        text: async () => entry.body,
+      };
+    },
+    async delete(key: string) {
+      store.delete(key);
+    },
   } as unknown as R2Bucket;
 }
 

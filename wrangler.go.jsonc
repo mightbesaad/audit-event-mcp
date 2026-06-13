@@ -17,6 +17,20 @@
       // Named entrypoint (src/main.ts): get/decide on approvals only. The gated worker's
       // public route table is untouched — this is not an HTTP path that could be probed.
       "entrypoint": "ApprovalInternal"
+    },
+    {
+      "binding": "DOSSIER",
+      "service": "audit-event-mcp",
+      // Day 5 (D1): dossier downloads moved off the gated worker. A second, separately
+      // named entrypoint — read-one-dossier-by-capability-token only; ApprovalInternal
+      // stays get/decide only.
+      "entrypoint": "DossierInternal"
+    },
+    {
+      "binding": "NOTARY",
+      "service": "audit-event-notary"
+      // Day 5: same-origin proxy for /.well-known/notary-pubkey so the /verify page can
+      // fetch the key without CORS. Read-only; the notary worker is unchanged.
     }
   ],
   // CHANNELS_KV — DEPLOY DAY: bind the SAME namespace created for the gated worker

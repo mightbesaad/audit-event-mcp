@@ -210,7 +210,7 @@ describe("AuditDO", () => {
     expect(body.url).toContain("https://audit.example.com/dossier/");
   });
 
-  it("dossier does not return input_hash in exported events", async () => {
+  it("dossier exports the chain preimage but never payload_ref or input content", async () => {
     const r2 = makeMockR2();
     let capturedBody = "";
     const origPut = (r2 as unknown as Record<string, unknown>).put as (
@@ -229,7 +229,13 @@ describe("AuditDO", () => {
     );
     await doR2.fetch(post("/dossier", { subjectId: "user-1" }, DOSSIER_HEADERS));
 
-    expect(capturedBody).not.toContain("input_hash");
+    // Day 5: input_hash / prev_hash ARE exported — they are the chain_hash preimage that
+    // makes the /verify page possible, and they are digests, not content. What must never
+    // leave: payload_ref (locked privacy invariant) and the recorded input itself.
+    expect(capturedBody).toContain("input_hash");
+    expect(capturedBody).toContain("prev_hash");
+    expect(capturedBody).not.toContain("payload_ref");
+    expect(capturedBody).not.toContain("secret");
   });
 
   // --- alarm / notarization ---

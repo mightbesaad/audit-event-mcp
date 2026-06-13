@@ -746,24 +746,31 @@ export class AuditDO implements DurableObject {
     const clientId = request.headers.get("X-Client-Id") ?? "unknown";
     const baseUrl = request.headers.get("X-Base-Url") ?? "";
 
-    // input_hash and payload_ref are intentionally excluded
+    // payload_ref is intentionally excluded (privacy invariant — locked decision 8).
+    // input_hash / input_hash_omitted_reason / prev_hash are included as of Day 5: they are
+    // the chain_hash preimage, and without them a dossier cannot be independently
+    // re-verified on the public /verify page — they are digests and reasons, never content.
     const rows = this.sql
       .exec<{
         id: string;
         agent_id: string;
         session_id: string;
         event_type: string;
+        input_hash: string | null;
+        input_hash_omitted_reason: string | null;
         lawful_basis: string | null;
         purpose: string;
         subject_id: string | null;
         retention_days: number;
+        prev_hash: string | null;
         chain_hash: string;
         merkle_root: string | null;
         notary_sig: string | null;
         created_at: string;
       }>(
-        `SELECT id, agent_id, session_id, event_type, lawful_basis, purpose,
-                subject_id, retention_days, chain_hash, merkle_root, notary_sig, created_at
+        `SELECT id, agent_id, session_id, event_type, input_hash, input_hash_omitted_reason,
+                lawful_basis, purpose, subject_id, retention_days, prev_hash, chain_hash,
+                merkle_root, notary_sig, created_at
          FROM audit_events WHERE subject_id = ? ORDER BY created_at ASC`,
         raw.subjectId,
       )

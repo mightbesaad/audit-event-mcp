@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { isValidClientIdShape } from "@/lib/approval";
-import { checkApproval, requestApproval, tenantStub } from "@/lib/approval-flow";
+import { checkApproval, publicLinkBase, requestApproval, tenantStub } from "@/lib/approval-flow";
 import {
   consentSecurityHeaders,
   renderConsentErrorPage,
@@ -995,9 +995,10 @@ app.post("/mcp", async (c) => {
     try {
       const doHeaders: Record<string, string> = { "Content-Type": "application/json" };
       if (doPath === "/dossier") {
-        const reqUrl = new URL(c.req.url);
         doHeaders["X-Client-Id"] = clientId;
-        doHeaders["X-Base-Url"] = `${reqUrl.protocol}//${reqUrl.host}`;
+        // Dossier links point at the public go worker (D1, Day 5): downloads moved off
+        // this gated worker, which closed its one pre-existing public path.
+        doHeaders["X-Base-Url"] = publicLinkBase(c.env);
       }
       const doRes = await stub.fetch(`https://do-internal${doPath}`, {
         method: "POST",
@@ -1025,27 +1026,10 @@ app.post("/mcp", async (c) => {
   );
 });
 
-app.get("/dossier/:clientId/:uuid", async (c) => {
-  if (!c.env.AUDIT_PAYLOADS) {
-    return c.json({ error: "R2 not configured" }, 503);
-  }
-  const { clientId, uuid } = c.req.param();
-  const key = `dossier/${clientId}/${uuid}.jsonl`;
-  const obj = await c.env.AUDIT_PAYLOADS.get(key);
-  if (!obj) {
-    return c.json({ error: "Not found" }, 404);
-  }
-  const expiresAt = obj.customMetadata?.expiresAt;
-  if (expiresAt && new Date(expiresAt) < new Date()) {
-    await c.env.AUDIT_PAYLOADS.delete(key);
-    return c.json({ error: "Dossier expired" }, 410);
-  }
-  return new Response(obj.body, {
-    headers: {
-      "Content-Type": "application/x-ndjson",
-      "Content-Disposition": `attachment; filename="${uuid}.jsonl"`,
-    },
-  });
-});
+// The public GET /dossier/:clientId/:uuid route that lived here until Day 5 was the one
+// pre-existing hole in the everything-authenticated invariant. It now lives on the go
+// worker (D1), reached through the DossierInternal entrypoint in src/main.ts — this
+// worker's public route table no longer serves anything unauthenticated but the OAuth
+// endpoints, which ARE the gate.
 
 export default { fetch: app.fetch };
