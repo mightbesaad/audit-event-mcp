@@ -153,13 +153,19 @@ describe("POST /oauth/token", () => {
   });
 
   it("rejects unsupported grant types and missing/unknown scopes", async () => {
-    const wrongGrant = await worker.fetch(
-      tokenRequest({ grant_type: "authorization_code", scope: "agent" }),
-      env,
-      {} as never,
-    );
-    expect(wrongGrant.status).toBe(400);
-    expect(((await wrongGrant.json()) as { error: string }).error).toBe("unsupported_grant_type");
+    // authorization_code / refresh_token route to the library since D11 — "unsupported"
+    // now means grants NO branch owns, and a missing grant_type, never a 404 (condition 2).
+    const unsupported: Record<string, string>[] = [
+      { grant_type: "password", scope: "agent" },
+      { scope: "agent" },
+    ];
+    for (const grant of unsupported) {
+      const wrongGrant = await worker.fetch(tokenRequest(grant), env, {} as never);
+      expect(wrongGrant.status).toBe(400);
+      expect(((await wrongGrant.json()) as { error: string }).error).toBe(
+        "unsupported_grant_type",
+      );
+    }
 
     for (const scope of [undefined, "root", "agent admin"]) {
       const res = await worker.fetch(

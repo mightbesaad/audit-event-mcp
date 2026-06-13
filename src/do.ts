@@ -14,10 +14,12 @@ import {
 } from "@/lib/approval";
 import { mintApprovalUrl } from "@/lib/approval-flow";
 import {
+  buildMerkleProofs,
   canonicalJson,
   computeActionPayloadHash,
   computeChainHash,
   computeInputHash,
+  type MerkleProofStep,
 } from "@/lib/hash";
 import { isM2MScope } from "@/lib/m2m";
 import { isValidEmailShape, sendApprovalEmail } from "@/lib/notify";
@@ -734,6 +736,40 @@ export class AuditDO implements DurableObject {
     return Response.json({ secretHash: row.secret_hash });
   }
 
+  // For the notarized rows in a dossier, return row.id → inclusion proof to its merkle_root.
+  // Each distinct root is rebuilt from its FULL batch (all events sharing that root in this
+  // tenant DO, every subject), so the proof folds to exactly the root the notary signed.
+  private async buildDossierProofs(
+    rows: Array<{ id: string; merkle_root: string | null }>,
+  ): Promise<Map<string, MerkleProofStep[]>> {
+    const result = new Map<string, MerkleProofStep[]>();
+    const wanted = new Map<string, Set<string>>(); // merkle_root → row ids in this dossier
+    for (const row of rows) {
+      if (!row.merkle_root) continue;
+      const ids = wanted.get(row.merkle_root) ?? new Set<string>();
+      ids.add(row.id);
+      wanted.set(row.merkle_root, ids);
+    }
+
+    for (const [merkleRoot, ids] of wanted) {
+      const batch = this.sql
+        .exec<{ id: string; chain_hash: string }>(
+          "SELECT id, chain_hash FROM audit_events WHERE merkle_root = ? ORDER BY id ASC",
+          merkleRoot,
+        )
+        .toArray();
+      if (batch.length === 0) continue;
+      const { proofs } = await buildMerkleProofs(
+        batch.map((r) => ({ id: r.id, chainHash: r.chain_hash })),
+      );
+      for (const id of ids) {
+        const proof = proofs.get(id);
+        if (proof) result.set(id, proof);
+      }
+    }
+    return result;
+  }
+
   private async handleDossier(request: Request): Promise<Response> {
     const raw = (await request.json()) as { subjectId?: string };
     if (!raw.subjectId) {
@@ -746,30 +782,49 @@ export class AuditDO implements DurableObject {
     const clientId = request.headers.get("X-Client-Id") ?? "unknown";
     const baseUrl = request.headers.get("X-Base-Url") ?? "";
 
-    // input_hash and payload_ref are intentionally excluded
+    // payload_ref is intentionally excluded (privacy invariant — locked decision 8).
+    // input_hash / input_hash_omitted_reason / prev_hash are included as of Day 5: they are
+    // the chain_hash preimage, and without them a dossier cannot be independently
+    // re-verified on the public /verify page — they are digests and reasons, never content.
     const rows = this.sql
       .exec<{
         id: string;
         agent_id: string;
         session_id: string;
         event_type: string;
+        input_hash: string | null;
+        input_hash_omitted_reason: string | null;
         lawful_basis: string | null;
         purpose: string;
         subject_id: string | null;
         retention_days: number;
+        prev_hash: string | null;
         chain_hash: string;
         merkle_root: string | null;
         notary_sig: string | null;
         created_at: string;
       }>(
-        `SELECT id, agent_id, session_id, event_type, lawful_basis, purpose,
-                subject_id, retention_days, chain_hash, merkle_root, notary_sig, created_at
+        `SELECT id, agent_id, session_id, event_type, input_hash, input_hash_omitted_reason,
+                lawful_basis, purpose, subject_id, retention_days, prev_hash, chain_hash,
+                merkle_root, notary_sig, created_at
          FROM audit_events WHERE subject_id = ? ORDER BY created_at ASC`,
         raw.subjectId,
       )
       .toArray();
 
-    const ndjson = rows.map((row) => `${JSON.stringify(row)}\n`).join("");
+    // Attach a Merkle inclusion proof to every notarized row (Day-5 security fix). A dossier
+    // is a SUBSET of a batch, and all records in a batch carry the same (merkle_root,
+    // notary_sig); the proof is what binds THIS record to that signed root, so a verifier
+    // cannot be fooled by a borrowed signature stapled onto fabricated records. The proof is
+    // built from the full batch (every event sharing the root, across all subjects) — sibling
+    // hashes only, never other subjects' ids or content.
+    const proofByRowId = await this.buildDossierProofs(rows);
+    const enriched = rows.map((row) => {
+      const proof = proofByRowId.get(row.id);
+      return proof ? { ...row, merkle_proof: proof } : row;
+    });
+
+    const ndjson = enriched.map((row) => `${JSON.stringify(row)}\n`).join("");
     const token = dossierToken();
     const key = `dossier/${clientId}/${token}.jsonl`;
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();

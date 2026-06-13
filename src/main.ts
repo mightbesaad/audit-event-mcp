@@ -9,6 +9,11 @@ import {
   isValidClientIdShape,
 } from "@/lib/approval";
 import { tenantStub, witnessDecision } from "@/lib/approval-flow";
+import {
+  type DossierFetchResult,
+  type DossierInternalClient,
+  isValidDossierTokenShape,
+} from "@/lib/dossier";
 import type { Env } from "@/lib/types";
 import { sendDecisionWebhook } from "@/lib/webhook";
 
@@ -30,6 +35,37 @@ export default worker;
 // route table gains nothing and the everything-behind-Access invariant holds. The public worker
 // passes a clientId it extracted from an HMAC-verified link token; the DO name is derived here,
 // never from anything a browser sent.
+// Second narrow internal surface for go.kajaril.com (D1, Day 5): dossier downloads moved
+// off the gated worker's public route table. A SEPARATE entrypoint on purpose —
+// ApprovalInternal stays get/decide only, and each capability the public worker holds is
+// named in the go worker's service bindings where it can be audited. Authorization is the
+// 256-bit capability token in the R2 key: both segments are shape-checked, and a key that
+// doesn't exist is indistinguishable from one that never did.
+export class DossierInternal extends WorkerEntrypoint<Env> implements DossierInternalClient {
+  async getDossier(clientId: string, token: string): Promise<DossierFetchResult> {
+    if (!isValidClientIdShape(clientId) || !isValidDossierTokenShape(token)) {
+      return { status: "not_found" };
+    }
+    if (!this.env.AUDIT_PAYLOADS) return { status: "unavailable" };
+
+    const key = `dossier/${clientId}/${token}.jsonl`;
+    const obj = await this.env.AUDIT_PAYLOADS.get(key);
+    if (!obj) return { status: "not_found" };
+
+    const expiresAt = obj.customMetadata?.expiresAt;
+    if (expiresAt && new Date(expiresAt) < new Date()) {
+      await this.env.AUDIT_PAYLOADS.delete(key);
+      return { status: "expired" };
+    }
+    return {
+      status: "ok",
+      body: await obj.text(),
+      subjectId: obj.customMetadata?.subjectId ?? null,
+      expiresAt: expiresAt ?? null,
+    };
+  }
+}
+
 export class ApprovalInternal extends WorkerEntrypoint<Env> implements ApprovalInternalClient {
   async getApproval(clientId: string, approvalId: string): Promise<ApprovalRecord | null> {
     // Shape checks are defense-in-depth: callers are trusted workers, but a malformed

@@ -1,7 +1,12 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { isValidClientIdShape } from "@/lib/approval";
-import { checkApproval, requestApproval, tenantStub } from "@/lib/approval-flow";
+import { checkApproval, publicLinkBase, requestApproval, tenantStub } from "@/lib/approval-flow";
+import {
+  consentSecurityHeaders,
+  renderConsentErrorPage,
+  renderConsentPage,
+} from "@/lib/consent-page";
 import {
   ACCESS_TOKEN_TTL_SECONDS,
   constantTimeEqualHex,
@@ -14,6 +19,16 @@ import {
   verifyAccessToken,
 } from "@/lib/m2m";
 import { isValidEmailShape, kvEmailForClient } from "@/lib/notify";
+import {
+  consentHelpers,
+  effectiveScope,
+  forwardToOAuthProvider,
+  grantableScopes,
+  MAX_AUTH_REQUEST_STATE_CHARS,
+  mintConsentState,
+  unwrapBrowserToken,
+  verifyConsentState,
+} from "@/lib/oauth-browser";
 import { RESERVED_EVENT_TYPE_PREFIX } from "@/lib/schema";
 import { CONNECT_CODE_TTL_SECONDS, generateConnectCode, kvConnectCode } from "@/lib/telegram";
 import type { Env } from "@/lib/types";
@@ -170,6 +185,32 @@ async function authenticate(
 
   const authz = req.header("Authorization");
   if (authz?.startsWith("Bearer ")) {
+    const token = authz.slice("Bearer ".length);
+
+    // Browser-flow opaque tokens (D11) contain ":" (userId:grantId:secret); our M2M JWTs
+    // are dot-separated base64url and never can. The shapes are disjoint, so the lane is
+    // picked structurally — garbage tokens fail uniformly in either lane.
+    if (token.includes(":")) {
+      if (!env.OAUTH_KV) {
+        return {
+          ok: false,
+          status: 503,
+          error: "Server misconfigured",
+          detail: "OAUTH_KV is not bound; refusing to process unverifiable tokens",
+        };
+      }
+      const browserAuth = await unwrapBrowserToken(env, token);
+      if (!browserAuth) {
+        return {
+          ok: false,
+          status: 401,
+          error: "Unauthorized",
+          detail: "Invalid or expired access token",
+        };
+      }
+      return { ok: true, clientId: browserAuth.clientId, scope: browserAuth.scope };
+    }
+
     if (!env.M2M_TOKEN_SIGNING_SECRET) {
       return {
         ok: false,
@@ -178,10 +219,7 @@ async function authenticate(
         detail: "M2M_TOKEN_SIGNING_SECRET is not set; refusing to process unverifiable tokens",
       };
     }
-    const claims = await verifyAccessToken(
-      env.M2M_TOKEN_SIGNING_SECRET,
-      authz.slice("Bearer ".length),
-    );
+    const claims = await verifyAccessToken(env.M2M_TOKEN_SIGNING_SECRET, token);
     if (!claims) {
       return {
         ok: false,
@@ -216,9 +254,24 @@ app.get("/health", (c) => {
   return c.json({ status: "ok", product: "audit-event-mcp", version: "0.1.0" });
 });
 
-// --- OAuth 2.1 client-credentials token endpoint (D2) ---
-// Hand-rolled on Web Crypto (Day-0 supply-chain rule: no new dependency for this).
-// Error vocabulary is RFC 6749 §5.2; every response is uncacheable per §5.1.
+// --- /oauth/token: one endpoint, routed by grant_type (D11) ---
+// The shim owns the route. client_credentials stays on the hand-rolled D10 path below;
+// authorization_code / refresh_token (and the RFC 7009 revocation shape the metadata
+// advertises at this endpoint) forward to workers-oauth-provider. All six D11 conditions
+// are load-bearing here:
+//   1. per-IP and per-client caps fire BEFORE the branch — the library path is equally capped
+//   2. uniform RFC 6749 vocabulary from every branch; missing/unknown grant_type is
+//      unsupported_grant_type, never a 404, and no response shape reveals which path exists
+//   3. the body is buffered exactly once, reconstructed for the library, and never logged
+//      (client secrets travel in form bodies)
+//   4. RFC 8414 metadata (below) advertises this single endpoint
+//   5. the library-owned surfaces get the adversarial tests in test/oauth-browser.test.ts
+//   6. OAUTH_KV is a deploy-day create-and-bind (wrangler.jsonc)
+
+// Form bodies here are credentials + grant parameters — generous cap, but bounded before
+// any crypto, KV, or DO work happens on hostile input.
+const MAX_TOKEN_BODY_CHARS = 16 * 1024;
+
 app.post("/oauth/token", async (c) => {
   const oauthError = (status: 400 | 401 | 429 | 503, error: string, description: string) =>
     c.json({ error, error_description: description }, status, {
@@ -226,16 +279,8 @@ app.post("/oauth/token", async (c) => {
       ...(status === 401 ? { "WWW-Authenticate": 'Basic realm="oauth/token"' } : {}),
     });
 
-  if (!c.env.M2M_TOKEN_SIGNING_SECRET) {
-    return oauthError(
-      503,
-      "temporarily_unavailable",
-      "M2M_TOKEN_SIGNING_SECRET is not set; token issuance is disabled",
-    );
-  }
-
-  // Per-IP cap before any parsing or DO work — this is the only endpoint where an
-  // unauthenticated caller can make the worker do real work.
+  // Per-IP cap before any parsing — an unauthenticated caller can make every branch of
+  // this endpoint do real work.
   if (c.env.APPROVAL_RATE_LIMITER) {
     const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
     const { success } = await c.env.APPROVAL_RATE_LIMITER.limit({ key: `tok-ip:${ip}` });
@@ -244,27 +289,27 @@ app.post("/oauth/token", async (c) => {
     }
   }
 
-  let form: Record<string, unknown>;
-  try {
-    form = await c.req.parseBody();
-  } catch {
+  const contentType = c.req.header("Content-Type") ?? "";
+  if (!contentType.includes("application/x-www-form-urlencoded")) {
     return oauthError(400, "invalid_request", "Body must be application/x-www-form-urlencoded");
   }
 
-  if (form.grant_type !== "client_credentials") {
-    return oauthError(
-      400,
-      "unsupported_grant_type",
-      "grant_type must be client_credentials (application/x-www-form-urlencoded body)",
-    );
+  // The one and only body read (D11 condition 3).
+  let rawBody: string;
+  try {
+    rawBody = await c.req.text();
+  } catch {
+    return oauthError(400, "invalid_request", "Body could not be read");
   }
-
-  const scope = form.scope;
-  if (!isM2MScope(scope)) {
-    return oauthError(400, "invalid_scope", "scope must be exactly 'agent' or 'admin'");
+  if (rawBody.length > MAX_TOKEN_BODY_CHARS) {
+    return oauthError(400, "invalid_request", "Body too large");
   }
+  const form = new URLSearchParams(rawBody);
+  const grantType = form.get("grant_type");
 
   // Client auth: HTTP Basic preferred (RFC 6749 §2.3.1), form params as the fallback.
+  // Extracted once, before the branch — the per-client cap needs the identifier, and a
+  // malformed Basic header is refused uniformly so no branch can be probed with one.
   let clientId: string | undefined;
   let clientSecret: string | undefined;
   const authz = c.req.header("Authorization");
@@ -279,8 +324,66 @@ app.post("/oauth/token", async (c) => {
       return oauthError(401, "invalid_client", "Malformed Basic authorization header");
     }
   } else {
-    clientId = typeof form.client_id === "string" ? form.client_id : undefined;
-    clientSecret = typeof form.client_secret === "string" ? form.client_secret : undefined;
+    clientId = form.get("client_id") ?? undefined;
+    clientSecret = form.get("client_secret") ?? undefined;
+  }
+
+  // Per-client cap before the branch (D11 condition 1). The identifier is only a rate key
+  // at this point — validation happens inside each branch. Bounded so a hostile id cannot
+  // bloat the rate-limiter key space per request.
+  if (clientId && c.env.APPROVAL_RATE_LIMITER) {
+    const { success } = await c.env.APPROVAL_RATE_LIMITER.limit({
+      key: `tok:${clientId.slice(0, 256)}`,
+    });
+    if (!success) {
+      return oauthError(429, "slow_down", "Too many token requests for this client");
+    }
+  }
+
+  // --- branch: library-owned grants (D11) ---
+  const isRevocationShape = grantType === null && form.get("token") !== null;
+  if (grantType === "authorization_code" || grantType === "refresh_token" || isRevocationShape) {
+    if (!c.env.OAUTH_KV) {
+      return oauthError(
+        503,
+        "temporarily_unavailable",
+        "OAUTH_KV is not bound; this grant type is disabled",
+      );
+    }
+    // Reconstruct the request from the single buffered body (condition 3). The library
+    // speaks the same RFC 6749 vocabulary, so responses stay uniform across branches.
+    const reconstructed = new Request(c.req.raw.url, {
+      method: "POST",
+      headers: c.req.raw.headers,
+      body: rawBody,
+    });
+    const res = await forwardToOAuthProvider(reconstructed, c.env, c.executionCtx);
+    if (res.headers.has("Cache-Control")) return res;
+    const withNoStore = new Response(res.body, res);
+    withNoStore.headers.set("Cache-Control", "no-store");
+    return withNoStore;
+  }
+
+  // --- branch: hand-rolled client_credentials (D10) ---
+  if (grantType !== "client_credentials") {
+    return oauthError(
+      400,
+      "unsupported_grant_type",
+      "grant_type must be client_credentials, authorization_code, or refresh_token",
+    );
+  }
+
+  if (!c.env.M2M_TOKEN_SIGNING_SECRET) {
+    return oauthError(
+      503,
+      "temporarily_unavailable",
+      "M2M_TOKEN_SIGNING_SECRET is not set; token issuance is disabled",
+    );
+  }
+
+  const scope = form.get("scope");
+  if (!isM2MScope(scope)) {
+    return oauthError(400, "invalid_scope", "scope must be exactly 'agent' or 'admin'");
   }
 
   // Uniform invalid_client for every credential failure from here on — malformed id,
@@ -293,13 +396,6 @@ app.post("/oauth/token", async (c) => {
     clientSecret.length > MAX_CLIENT_SECRET_CHARS
   ) {
     return oauthError(401, "invalid_client", "Client authentication failed");
-  }
-
-  if (c.env.APPROVAL_RATE_LIMITER) {
-    const { success } = await c.env.APPROVAL_RATE_LIMITER.limit({ key: `tok:${clientId}` });
-    if (!success) {
-      return oauthError(429, "slow_down", "Too many token requests for this client");
-    }
   }
 
   // The one place an unverified client_id reaches idFromName: a credential cannot be
@@ -332,6 +428,259 @@ app.post("/oauth/token", async (c) => {
     200,
     { "Cache-Control": "no-store", Pragma: "no-cache" },
   );
+});
+
+// --- library-owned browser-flow surfaces (D11): DCR, metadata, consent ---
+
+// Dynamic client registration. Unauthenticated by design (RFC 7591) — hostile registrants
+// are the norm (D11 condition 5), so it is IP-capped like the token endpoint and size-capped
+// by the library (1 MiB). Everything it writes is OAUTH_KV config, never evidence.
+app.post("/oauth/register", async (c) => {
+  const oauthError = (status: 429 | 503, error: string, description: string) =>
+    c.json({ error, error_description: description }, status, { "Cache-Control": "no-store" });
+
+  if (c.env.APPROVAL_RATE_LIMITER) {
+    const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+    const { success } = await c.env.APPROVAL_RATE_LIMITER.limit({ key: `reg-ip:${ip}` });
+    if (!success) {
+      return oauthError(429, "slow_down", "Too many registration requests from this address");
+    }
+  }
+  if (!c.env.OAUTH_KV) {
+    return oauthError(
+      503,
+      "temporarily_unavailable",
+      "OAUTH_KV is not bound; client registration is disabled",
+    );
+  }
+  return forwardToOAuthProvider(c.req.raw, c.env, c.executionCtx);
+});
+
+// RFC 8414 metadata, generated by the library and augmented at the shim: the library only
+// knows its own grants, but the single advertised /oauth/token (D11 condition 4) also
+// accepts client_credentials on the hand-rolled path.
+app.get("/.well-known/oauth-authorization-server", async (c) => {
+  const res = await forwardToOAuthProvider(c.req.raw, c.env, c.executionCtx);
+  if (!res.ok) return res;
+  const metadata = (await res.json()) as Record<string, unknown>;
+  const grants = Array.isArray(metadata.grant_types_supported)
+    ? (metadata.grant_types_supported as string[])
+    : [];
+  metadata.grant_types_supported = [...grants, "client_credentials"];
+  return c.json(metadata);
+});
+
+// RFC 9728 protected-resource metadata — how MCP clients discover the authorization server.
+app.get("/.well-known/oauth-protected-resource", (c) =>
+  forwardToOAuthProvider(c.req.raw, c.env, c.executionCtx),
+);
+app.get("/.well-known/oauth-protected-resource/*", (c) =>
+  forwardToOAuthProvider(c.req.raw, c.env, c.executionCtx),
+);
+
+// --- consent (D11): rendered by us, completed through the library's helpers ---
+// The human consenting is a tenant operator authenticated by the CF Access SSO session on
+// this domain — the only human-login fence the gated worker has. Bearer tokens cannot
+// consent: a stolen agent credential must never be able to mint itself a browser grant.
+// userId / props.clientId are set from the verified Access JWT, so nothing the OAuth
+// client supplied ever selects a tenant (the D1/D3 law, third lane).
+
+type ConsentReady = { ok: true; tenant: string };
+type ConsentBlocked = { ok: false; response: Response | Promise<Response> };
+
+async function consentGate(c: {
+  req: { header: (name: string) => string | undefined };
+  env: Env;
+  html: (html: string, status: 401 | 503) => Response | Promise<Response>;
+}): Promise<ConsentReady | ConsentBlocked> {
+  if (
+    !c.env.OAUTH_KV ||
+    !c.env.M2M_TOKEN_SIGNING_SECRET ||
+    !c.env.CF_ACCESS_TEAM_DOMAIN ||
+    !c.env.CF_ACCESS_APP_AUD
+  ) {
+    return {
+      ok: false,
+      response: c.html(
+        renderConsentErrorPage(
+          "Unavailable",
+          "The authorization service is not fully configured. Try again later.",
+        ),
+        503,
+      ),
+    };
+  }
+  const cfJwt = c.req.header("CF-Access-Jwt-Assertion");
+  const tenant = cfJwt
+    ? await verifyJwt(cfJwt, c.env.CF_ACCESS_TEAM_DOMAIN, c.env.CF_ACCESS_APP_AUD)
+    : null;
+  if (!tenant || !isValidClientIdShape(tenant)) {
+    return {
+      ok: false,
+      response: c.html(
+        renderConsentErrorPage(
+          "Sign-in required",
+          "Authorizing an application requires a signed-in operator session (Cloudflare Access). Open this page through your access link.",
+        ),
+        401,
+      ),
+    };
+  }
+  return { ok: true, tenant };
+}
+
+app.get("/oauth/authorize", async (c) => {
+  consentSecurityHeaders(c);
+
+  if (c.env.APPROVAL_RATE_LIMITER) {
+    const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+    const { success } = await c.env.APPROVAL_RATE_LIMITER.limit({ key: `auth-ip:${ip}` });
+    if (!success) {
+      return c.html(
+        renderConsentErrorPage("Slow down", "Too many authorization requests. Try again shortly."),
+        429,
+      );
+    }
+  }
+
+  const gate = await consentGate(c);
+  if (!gate.ok) return gate.response;
+
+  // state echoes back to the client verbatim and rides inside our signed consent blob —
+  // bound before any parsing so a hostile value cannot bloat either.
+  if ((c.req.query("state") ?? "").length > MAX_AUTH_REQUEST_STATE_CHARS) {
+    return c.html(renderConsentErrorPage("Invalid request", "state parameter too long"), 400);
+  }
+
+  const helpers = consentHelpers(c.env);
+  let authReq: Awaited<ReturnType<typeof helpers.parseAuthRequest>>;
+  try {
+    authReq = await helpers.parseAuthRequest(c.req.raw);
+  } catch (e) {
+    // Library validation messages are fixed strings (never echo request content), and the
+    // page must NEVER redirect on a failed parse — an unvalidated redirect_uri is exactly
+    // what an open redirect is made of.
+    const msg = e instanceof Error ? e.message : "Invalid authorization request";
+    return c.html(renderConsentErrorPage("Invalid request", msg), 400);
+  }
+
+  if (!authReq.clientId || !authReq.redirectUri || authReq.responseType !== "code") {
+    return c.html(
+      renderConsentErrorPage(
+        "Invalid request",
+        "response_type=code with client_id and redirect_uri is required",
+      ),
+      400,
+    );
+  }
+
+  const client = await helpers.lookupClient(authReq.clientId);
+  if (!client) {
+    return c.html(renderConsentErrorPage("Invalid request", "Unknown client"), 400);
+  }
+
+  // OAuth 2.1: public clients get no secret, so the code is only bound to its requester
+  // via PKCE — without a challenge, a leaked redirect is a token.
+  if (client.tokenEndpointAuthMethod === "none" && !authReq.codeChallenge) {
+    return c.html(
+      renderConsentErrorPage("Invalid request", "PKCE (S256 code_challenge) is required"),
+      400,
+    );
+  }
+
+  const stateBlob = await mintConsentState(c.env.M2M_TOKEN_SIGNING_SECRET as string, {
+    tenant: gate.tenant,
+    authRequest: authReq,
+  });
+
+  return c.html(
+    renderConsentPage({
+      client,
+      tenant: gate.tenant,
+      scopes: grantableScopes(authReq.scope),
+      redirectUri: authReq.redirectUri,
+      stateBlob,
+    }),
+  );
+});
+
+app.post("/oauth/authorize/decision", async (c) => {
+  consentSecurityHeaders(c);
+
+  const gate = await consentGate(c);
+  if (!gate.ok) return gate.response;
+
+  let blob: string | undefined;
+  let decision: string | undefined;
+  try {
+    const form = await c.req.formData();
+    const rawBlob = form.get("consent_state");
+    const rawDecision = form.get("decision");
+    blob = typeof rawBlob === "string" ? rawBlob : undefined;
+    decision = typeof rawDecision === "string" ? rawDecision : undefined;
+  } catch {
+    return c.html(renderConsentErrorPage("Invalid request", "Malformed form body"), 400);
+  }
+
+  const state = blob
+    ? await verifyConsentState(c.env.M2M_TOKEN_SIGNING_SECRET as string, blob)
+    : null;
+  if (!state) {
+    return c.html(
+      renderConsentErrorPage(
+        "Request expired",
+        "This authorization request is invalid or has expired. Start again from your application.",
+      ),
+      400,
+    );
+  }
+  // The blob was minted for the tenant who was SHOWN the consent screen. A blob from any
+  // other Access session deciding here would be a confused deputy — refuse.
+  if (state.tenant !== gate.tenant) {
+    return c.html(
+      renderConsentErrorPage(
+        "Session mismatch",
+        "This authorization request belongs to a different operator session.",
+      ),
+      403,
+    );
+  }
+
+  const authReq = state.authRequest;
+  const helpers = consentHelpers(c.env);
+  const client = await helpers.lookupClient(authReq.clientId);
+  // Exact-match redirect validation before ANY redirect leaves this handler — including
+  // the deny path, which builds its redirect by hand.
+  if (!client?.redirectUris.includes(authReq.redirectUri)) {
+    return c.html(renderConsentErrorPage("Invalid request", "Unknown client or redirect"), 400);
+  }
+
+  if (decision === "deny") {
+    const url = new URL(authReq.redirectUri);
+    url.searchParams.set("error", "access_denied");
+    if (authReq.state) url.searchParams.set("state", authReq.state);
+    return c.redirect(url.toString(), 302);
+  }
+  if (decision !== "approve") {
+    return c.html(renderConsentErrorPage("Invalid request", "Unknown decision"), 400);
+  }
+
+  const granted = grantableScopes(authReq.scope);
+  try {
+    const { redirectTo } = await helpers.completeAuthorization({
+      request: authReq,
+      userId: gate.tenant,
+      metadata: { consentedAt: new Date().toISOString() },
+      scope: granted,
+      props: { clientId: gate.tenant, scope: effectiveScope(granted) },
+    });
+    return c.redirect(redirectTo, 302);
+  } catch {
+    return c.html(
+      renderConsentErrorPage("Authorization failed", "Could not complete the authorization."),
+      400,
+    );
+  }
 });
 
 // Mint or rotate an M2M client secret (D2): one credential per scope, issued separately,
@@ -646,9 +995,10 @@ app.post("/mcp", async (c) => {
     try {
       const doHeaders: Record<string, string> = { "Content-Type": "application/json" };
       if (doPath === "/dossier") {
-        const reqUrl = new URL(c.req.url);
         doHeaders["X-Client-Id"] = clientId;
-        doHeaders["X-Base-Url"] = `${reqUrl.protocol}//${reqUrl.host}`;
+        // Dossier links point at the public go worker (D1, Day 5): downloads moved off
+        // this gated worker, which closed its one pre-existing public path.
+        doHeaders["X-Base-Url"] = publicLinkBase(c.env);
       }
       const doRes = await stub.fetch(`https://do-internal${doPath}`, {
         method: "POST",
@@ -676,27 +1026,10 @@ app.post("/mcp", async (c) => {
   );
 });
 
-app.get("/dossier/:clientId/:uuid", async (c) => {
-  if (!c.env.AUDIT_PAYLOADS) {
-    return c.json({ error: "R2 not configured" }, 503);
-  }
-  const { clientId, uuid } = c.req.param();
-  const key = `dossier/${clientId}/${uuid}.jsonl`;
-  const obj = await c.env.AUDIT_PAYLOADS.get(key);
-  if (!obj) {
-    return c.json({ error: "Not found" }, 404);
-  }
-  const expiresAt = obj.customMetadata?.expiresAt;
-  if (expiresAt && new Date(expiresAt) < new Date()) {
-    await c.env.AUDIT_PAYLOADS.delete(key);
-    return c.json({ error: "Dossier expired" }, 410);
-  }
-  return new Response(obj.body, {
-    headers: {
-      "Content-Type": "application/x-ndjson",
-      "Content-Disposition": `attachment; filename="${uuid}.jsonl"`,
-    },
-  });
-});
+// The public GET /dossier/:clientId/:uuid route that lived here until Day 5 was the one
+// pre-existing hole in the everything-authenticated invariant. It now lives on the go
+// worker (D1), reached through the DossierInternal entrypoint in src/main.ts — this
+// worker's public route table no longer serves anything unauthenticated but the OAuth
+// endpoints, which ARE the gate.
 
 export default { fetch: app.fetch };

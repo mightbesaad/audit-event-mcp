@@ -37,6 +37,12 @@ const REQUESTED_PURPOSE = "human oversight — approval requested (AI Act Art. 1
 // Self-hosters point APPROVAL_LINK_BASE_URL at their own deployment.
 const DEFAULT_APPROVAL_LINK_BASE = "https://go.kajaril.com";
 
+// Every public human-facing link (approval pages, dossier downloads since Day 5) points at
+// the go worker — one base, one override for self-hosters.
+export function publicLinkBase(env: Env): string {
+  return (env.APPROVAL_LINK_BASE_URL ?? DEFAULT_APPROVAL_LINK_BASE).replace(/\/+$/, "");
+}
+
 // One mint path for every surface that hands a human the link (request_approval response,
 // telegram card, escalation email). The token's exp outlives the approval's expires_at by
 // the grace window (token.ts) so late clickers get a terminal-state page, not "invalid
@@ -48,7 +54,7 @@ export async function mintApprovalUrl(
   expiresAt: string,
 ): Promise<string | null> {
   if (!env.APPROVAL_TOKEN_SECRET) return null;
-  const base = (env.APPROVAL_LINK_BASE_URL ?? DEFAULT_APPROVAL_LINK_BASE).replace(/\/+$/, "");
+  const base = publicLinkBase(env);
   const token = await mintApprovalToken(env.APPROVAL_TOKEN_SECRET, {
     clientId,
     approvalId,

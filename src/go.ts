@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import type { ApprovalRecord } from "@/lib/approval";
-import { MAX_REASON_CHARS } from "@/lib/approval";
+import { isValidClientIdShape, MAX_REASON_CHARS } from "@/lib/approval";
+import { isValidDossierTokenShape, parseDossierJsonl } from "@/lib/dossier";
+import { renderDossierPage, renderDossierStatePage } from "@/lib/dossier-page";
 import {
   constantTimeEqualString,
   processTelegramUpdate,
@@ -9,12 +11,14 @@ import {
 } from "@/lib/telegram";
 import { verifyApprovalToken } from "@/lib/token";
 import type { GoEnv } from "@/lib/types";
+import { renderVerifyPage, VERIFY_PAGE_CSP, VERIFY_SCRIPT } from "@/lib/verify-page";
 
-// go.kajaril.com — the only public human surface (decision D1). Hosts the approve page;
-// /verify and dossier downloads join it on Day 5. Approve pages ported from gvnr
+// go.kajaril.com — the only public human surface (decision D1). Hosts the approve page,
+// and since Day 5 the dossier pages and /verify. Approve pages ported from gvnr
 // src/routes/approve.ts (donor, read-only): no inline JS anywhere — buttons submit plain
 // HTML forms; decisions are state-changing POSTs so link scanners that prefetch GET
-// can never decide anything.
+// can never decide anything. /verify is the one page that runs script (client-side
+// verification IS the product claim); it gets its own CSP, script from 'self' only.
 
 const app = new Hono<{ Bindings: GoEnv }>();
 
@@ -288,6 +292,157 @@ app.post("/a/:token/decide", async (c) => {
   }
   if (!result.record) return c.html(renderNotFound(), 404);
   return c.html(renderTerminal(result.record));
+});
+
+// --- dossier pages (D1, Day 5): moved off the gated worker ---
+// The 256-bit capability token in the URL is the authorization; both path segments are
+// shape-checked here AND in DossierInternal (defense-in-depth), and an invalid shape is
+// indistinguishable from a missing dossier.
+
+type DossierLookup =
+  | { kind: "response"; response: Response | Promise<Response> }
+  | {
+      kind: "ok";
+      body: string;
+      subjectId: string | null;
+      expiresAt: string | null;
+    };
+
+async function lookupDossier(c: {
+  env: GoEnv;
+  req: { param: (name: string) => string };
+  html: (html: string, status: 404 | 410 | 503) => Response | Promise<Response>;
+}): Promise<DossierLookup> {
+  if (!c.env.DOSSIER) {
+    return {
+      kind: "response",
+      response: c.html(
+        renderDossierStatePage("Unavailable", "Dossier downloads are not configured."),
+        503,
+      ),
+    };
+  }
+  const clientId = c.req.param("clientId");
+  const token = c.req.param("token");
+  if (!isValidClientIdShape(clientId) || !isValidDossierTokenShape(token)) {
+    return {
+      kind: "response",
+      response: c.html(
+        renderDossierStatePage("Not found", "This dossier link is invalid or has expired."),
+        404,
+      ),
+    };
+  }
+  const result = await c.env.DOSSIER.getDossier(clientId, token);
+  if (result.status === "ok") {
+    return {
+      kind: "ok",
+      body: result.body,
+      subjectId: result.subjectId,
+      expiresAt: result.expiresAt,
+    };
+  }
+  if (result.status === "expired") {
+    return {
+      kind: "response",
+      response: c.html(
+        renderDossierStatePage(
+          "Dossier expired",
+          "This download link has expired. Ask the tenant to export the dossier again.",
+        ),
+        410,
+      ),
+    };
+  }
+  if (result.status === "unavailable") {
+    return {
+      kind: "response",
+      response: c.html(
+        renderDossierStatePage("Unavailable", "Dossier storage is not configured."),
+        503,
+      ),
+    };
+  }
+  return {
+    kind: "response",
+    response: c.html(
+      renderDossierStatePage("Not found", "This dossier link is invalid or has expired."),
+      404,
+    ),
+  };
+}
+
+app.get("/dossier/:clientId/:token", async (c) => {
+  securityHeaders(c);
+  const lookup = await lookupDossier(c);
+  if (lookup.kind === "response") return lookup.response;
+
+  const rows = parseDossierJsonl(lookup.body);
+  if (rows === null || rows.length === 0) {
+    return c.html(
+      renderDossierStatePage(
+        "Unreadable dossier",
+        "The stored evidence file could not be rendered. The raw download may still work.",
+      ),
+      404,
+    );
+  }
+  return c.html(
+    renderDossierPage({
+      rows,
+      clientId: c.req.param("clientId"),
+      token: c.req.param("token"),
+      subjectId: lookup.subjectId,
+      expiresAt: lookup.expiresAt,
+    }),
+  );
+});
+
+app.get("/dossier/:clientId/:token/raw", async (c) => {
+  securityHeaders(c);
+  const lookup = await lookupDossier(c);
+  if (lookup.kind === "response") return lookup.response;
+  return new Response(lookup.body, {
+    headers: {
+      "Content-Type": "application/x-ndjson",
+      "Content-Disposition": `attachment; filename="${c.req.param("token")}.jsonl"`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+});
+
+// --- /verify (Day 5): client-side dossier verification ---
+
+app.get("/verify", (c) => {
+  c.header("Content-Security-Policy", VERIFY_PAGE_CSP);
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("Referrer-Policy", "no-referrer");
+  return c.html(renderVerifyPage());
+});
+
+app.get("/verify.js", (c) => {
+  return c.text(VERIFY_SCRIPT, 200, {
+    "Content-Type": "text/javascript; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+  });
+});
+
+// Same-origin proxy for the notary's published verification key: /verify fetches it here,
+// so the notary worker needs no CORS and stays untouched (D7's zero-changes promise).
+app.get("/.well-known/notary-pubkey", async (c) => {
+  if (!c.env.NOTARY) {
+    return c.json({ error: "Notary not configured" }, 503);
+  }
+  const res = await c.env.NOTARY.fetch("https://notary-internal/.well-known/notary-pubkey");
+  return new Response(res.body, {
+    status: res.status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "public, max-age=3600",
+    },
+  });
 });
 
 async function hashShort(input: string): Promise<string> {

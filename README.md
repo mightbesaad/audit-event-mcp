@@ -78,11 +78,23 @@ Export a data subject's records:
 
 ## Authentication
 
-Two ways in; both end at a signature-verified `client_id` that selects your tenant — nothing
-user-supplied ever does.
+Three ways in; all end at a signature-verified `client_id` that selects your tenant —
+nothing user-supplied ever does.
 
 **Cloudflare Access service token** (manual onboarding): send the token headers, CF Access
 injects a verified JWT. Full surface.
+
+**OAuth browser flow** (MCP clients, zero copy-paste): point your client at the server and
+let it discover the rest —
+
+```sh
+claude mcp add --transport http audit-event https://audit-event.kajaril.com/mcp
+```
+
+RFC 8414 metadata advertises dynamic client registration (`/oauth/register`),
+authorization with PKCE S256 (`/oauth/authorize`), and the shared token endpoint. Consent
+is approved in the browser by a signed-in tenant operator; the granted scope (`agent` or
+`admin`) is bound into the issued token.
 
 **OAuth client-credentials (M2M)**: exchange a client secret for a 1-hour Bearer token at
 `POST /oauth/token` (`application/x-www-form-urlencoded`, HTTP Basic or `client_id` /
@@ -130,12 +142,26 @@ Every 15 minutes (or at 1,000 pending events), the notary Worker:
 3. Signs the root with Ed25519
 4. Writes `merkle_root` + `notary_sig` back to each record
 
-The notary public key is published at `/.well-known/notary-pubkey`. Any auditor can verify signatures offline without contacting kajaril. The notary never receives `input_hash`, `payload_ref`, or any payload content.
+The notary public key is published at `/.well-known/notary-pubkey` (also proxied
+same-origin on go.kajaril.com for the verify page). Any auditor can verify signatures
+offline without contacting kajaril. The notary never receives `input_hash`, `payload_ref`,
+or any payload content.
+
+### Verifying a dossier
+
+`export_dossier` returns a link to a human-readable dossier on **go.kajaril.com** with a
+raw JSONL evidence file attached. Anyone can drop that file onto
+**https://go.kajaril.com/verify** — the browser recomputes every record's chain
+fingerprint from its exported preimage (`id | event_type | input_hash ?? omitted_reason |
+prev_hash`) and checks each notary Ed25519 signature against the published key. Nothing is
+uploaded; the verdict is computed client-side.
 
 ### Privacy design
 
 - `input` is hashed locally; the raw value is not stored unless an R2 bucket is explicitly bound
-- `input_hash` is excluded from all `query_events` and `export_dossier` responses
+- `input_hash` is excluded from `query_events` responses; dossiers export it (with
+  `prev_hash`) as the chain preimage that makes independent verification possible — they
+  are digests, never content
 - `payload_ref` is never returned to callers — enforced at every handler boundary
 - An empty `export_dossier` result (`eventCount: 0`) is valid GDPR evidence that no data exists for a subject
 

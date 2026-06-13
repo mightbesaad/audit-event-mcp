@@ -11,5 +11,12 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    server: {
+      deps: {
+        // Force the library through Vite's resolver so the cloudflare:workers alias above
+        // applies to it too — Node's native ESM loader cannot load the cloudflare: scheme.
+        inline: ["@cloudflare/workers-oauth-provider"],
+      },
+    },
   },
 });

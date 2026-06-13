@@ -106,6 +106,12 @@ export interface Env {
   // Signing key for M2M access tokens (D2), a Workers Secret. Unset → /oauth/token and
   // Bearer auth fail closed (503): a token we cannot verify must never select a tenant.
   M2M_TOKEN_SIGNING_SECRET?: string;
+  // Storage for the browser OAuth flow (D11): workers-oauth-provider keeps DCR'd clients,
+  // grants, and token hashes here. Routing/auth state only, never evidence. Unset → the
+  // authorization_code / refresh_token branch of /oauth/token, /oauth/register, and
+  // browser-token Bearer auth all fail closed (503); client_credentials is unaffected.
+  // Deploy day: create-and-bind alongside CHANNELS_KV (D11 condition 6).
+  OAUTH_KV?: KVNamespace;
   // Channel routing config (D4): connect codes, telegram chat bindings, approver email.
   // Bound to BOTH workers — the go worker's Telegram webhook resolves chat → tenant here.
   // Mutable routing state only, never evidence: nothing in this KV is witnessed material,
@@ -127,6 +133,15 @@ export interface Env {
 // typed structurally so tests can substitute a plain mock.
 export interface GoEnv {
   AUDIT: import("@/lib/approval").ApprovalInternalClient;
+  // Dossier reads (D1, Day 5): the DossierInternal entrypoint in src/main.ts — a second,
+  // separately-named capability; ApprovalInternal stays get/decide only. Unset → dossier
+  // pages fail closed (503).
+  DOSSIER?: import("@/lib/dossier").DossierInternalClient;
+  // Service binding to the notary worker: /verify fetches the notary public key
+  // same-origin through this proxy, so the notary needs no CORS and stays untouched.
+  // Unset → /.well-known/notary-pubkey reports 503 (the /verify page degrades to
+  // "unverifiable", never to a false verdict).
+  NOTARY?: Fetcher;
   APPROVAL_TOKEN_SECRET?: string;
   // Telegram webhook surface (D4). The webhook secret is OUR value, registered with
   // setWebhook and echoed back by Telegram in X-Telegram-Bot-Api-Secret-Token — the only
