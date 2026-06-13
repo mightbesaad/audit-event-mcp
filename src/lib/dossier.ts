@@ -14,6 +14,8 @@ export function isValidDossierTokenShape(token: string): boolean {
 // One line of the exported JSONL (do.ts handleDossier). payload_ref is never exported
 // (locked privacy invariant); input_hash / input_hash_omitted_reason / prev_hash are the
 // chain_hash preimage that makes a dossier independently re-verifiable (Day 5).
+// merkle_proof is the inclusion path binding this record to its signed merkle_root — present
+// only on notarized records (Day-5 security fix; see buildMerkleProofs).
 export interface DossierRow {
   id: string;
   agent_id: string;
@@ -29,6 +31,7 @@ export interface DossierRow {
   chain_hash: string;
   merkle_root: string | null;
   notary_sig: string | null;
+  merkle_proof?: import("@/lib/hash").MerkleProofStep[];
   created_at: string;
 }
 

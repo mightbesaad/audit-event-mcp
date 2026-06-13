@@ -3,10 +3,9 @@ import * as ed from "@noble/ed25519";
 import { beforeAll, describe, expect, it } from "vitest";
 import { AuditDO } from "@/do";
 import goWorker from "@/go";
-import { buildMerkleRoot } from "@/lib/hash";
 import type { DossierFetchResult, DossierInternalClient } from "@/lib/dossier";
-import type { DossierResult } from "@/lib/types";
-import type { GoEnv } from "@/lib/types";
+import { buildMerkleRoot } from "@/lib/hash";
+import type { DossierResult, GoEnv } from "@/lib/types";
 import { VERIFY_SCRIPT } from "@/lib/verify-page";
 // `cloudflare:workers` is aliased to test/stubs/cloudflare-workers.ts in vitest.config.ts
 import { DossierInternal } from "@/main";
@@ -51,19 +50,19 @@ type VerifyReport = {
   fingerprints: { checked: number; passed: number; failed: string[]; uncheckable: number };
   linkage: { linked: number };
   notary: {
+    claimedRecords: number;
     attestedRecords: number;
     roots: number;
     verifiedRoots: number;
     failedRoots: string[];
+    brokenInclusion: string[];
     keyUsable: boolean;
   };
   verdict: string;
 };
 type VerifyFn = (text: string, pubkeyHex: string, subtle: SubtleCrypto) => Promise<VerifyReport>;
 
-const verifyDossier = new Function(
-  `${VERIFY_SCRIPT}; return kajarilVerifyDossier;`,
-)() as VerifyFn;
+const verifyDossier = new Function(`${VERIFY_SCRIPT}; return kajarilVerifyDossier;`)() as VerifyFn;
 
 const BASE_EVENT = {
   eventType: "tool.call" as const,
@@ -102,9 +101,9 @@ async function buildDossierFixture(opts: { notarize: boolean }): Promise<{
   expect(dossierRes.status).toBe(200);
   const { url } = (await dossierRes.json()) as DossierResult;
   const token = url.split("/").pop() as string;
-  const obj = await (r2 as unknown as { get: (k: string) => Promise<{ text(): Promise<string> }> }).get(
-    `dossier/client-test/${token}.jsonl`,
-  );
+  const obj = await (
+    r2 as unknown as { get: (k: string) => Promise<{ text(): Promise<string> }> }
+  ).get(`dossier/client-test/${token}.jsonl`);
   expect(obj).not.toBeNull();
   return { jsonl: await obj.text(), db };
 }
@@ -180,6 +179,82 @@ describe("the /verify.js core — against real chains and real signatures", () =
     db.close();
   });
 
+  it("includes a Merkle inclusion proof on every notarized record", async () => {
+    const { jsonl, db } = await buildDossierFixture({ notarize: true });
+    const rows = jsonl
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    for (const row of rows) {
+      expect(Array.isArray(row.merkle_proof)).toBe(true);
+    }
+    db.close();
+  });
+
+  // THE attack the inclusion proof exists to stop (Day-5 security fix): an attacker borrows a
+  // genuine (merkle_root, notary_sig) pair from any real dossier and staples it onto records
+  // they fabricated — every chain-preimage field is public, so the fingerprints recompute and
+  // the signature is genuine. Only the inclusion proof exposes the forgery: the fabricated
+  // leaf is not under the signed root.
+  it("rejects a genuine notary signature stapled onto fabricated records", async () => {
+    const { jsonl, db } = await buildDossierFixture({ notarize: true });
+    const real = jsonl
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .find((r) => r.merkle_root && r.notary_sig) as Record<string, unknown>;
+
+    const sha256Hex = async (text: string) =>
+      Array.from(
+        new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
+      )
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+
+    const fabId = "fabricated-evidence-0001";
+    const slot = "00".repeat(32);
+    const fabChain = await sha256Hex(`${fabId}|tool.call|${slot}|`); // matches computeChainHash
+    const fabricated = {
+      id: fabId,
+      agent_id: "attacker",
+      session_id: "s",
+      event_type: "tool.call",
+      input_hash: slot,
+      input_hash_omitted_reason: null,
+      lawful_basis: null,
+      purpose: "transfer 1,000,000 — totally approved",
+      subject_id: "victim",
+      retention_days: 365,
+      prev_hash: null,
+      chain_hash: fabChain,
+      merkle_root: real.merkle_root,
+      notary_sig: real.notary_sig,
+      created_at: "2026-06-13T00:00:00.000Z",
+    };
+
+    // (a) borrowed sig, NO proof
+    const noProof = await verifyDossier(
+      `${JSON.stringify(fabricated)}\n`,
+      NOTARY_PUB_HEX,
+      crypto.subtle,
+    );
+    expect(noProof.fingerprints.failed).toEqual([]); // self-consistent — fingerprints alone are fooled
+    expect(noProof.notary.failedRoots).toEqual([]); // the borrowed signature really is genuine
+    expect(noProof.notary.brokenInclusion).toContain(fabId); // …but the record is not in that batch
+    expect(noProof.notary.attestedRecords).toBe(0);
+    expect(noProof.verdict).toBe("failed");
+
+    // (b) borrowed sig + a bogus inclusion proof
+    const bogusProof = await verifyDossier(
+      `${JSON.stringify({ ...fabricated, merkle_proof: [{ hash: "aa".repeat(32), left: false }] })}\n`,
+      NOTARY_PUB_HEX,
+      crypto.subtle,
+    );
+    expect(bogusProof.notary.brokenInclusion).toContain(fabId);
+    expect(bogusProof.verdict).toBe("failed");
+    db.close();
+  });
+
   it("never throws on garbage input", async () => {
     for (const garbage of ["", "not json", '{"id": 1}', "[1,2,3]", " "]) {
       const report = await verifyDossier(garbage, NOTARY_PUB_HEX, crypto.subtle);
@@ -193,10 +268,13 @@ describe("DossierInternal entrypoint", () => {
   const TOKEN = "ab".repeat(32);
 
   function makeEntry(r2: R2Bucket | undefined): DossierInternal {
-    return new DossierInternal({} as ExecutionContext, {
-      ...fakeEnv,
-      AUDIT_PAYLOADS: r2,
-    } as never);
+    return new DossierInternal(
+      {} as ExecutionContext,
+      {
+        ...fakeEnv,
+        AUDIT_PAYLOADS: r2,
+      } as never,
+    );
   }
 
   it("serves a stored dossier by capability token", async () => {
@@ -354,8 +432,7 @@ describe("go worker — dossier pages and /verify", () => {
 
   it("proxies the notary pubkey same-origin and fails closed without the binding", async () => {
     const notary = {
-      fetch: async () =>
-        Response.json({ algorithm: "Ed25519", publicKey: NOTARY_PUB_HEX }),
+      fetch: async () => Response.json({ algorithm: "Ed25519", publicKey: NOTARY_PUB_HEX }),
     } as unknown as Fetcher;
     const ok = await get(goEnv({ NOTARY: notary }), "/.well-known/notary-pubkey");
     expect(ok.status).toBe(200);

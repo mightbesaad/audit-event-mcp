@@ -66,3 +66,59 @@ export async function buildMerkleRoot(
   if (root === undefined) throw new Error("empty layer");
   return root;
 }
+
+// One step of a Merkle inclusion proof.
+export interface MerkleProofStep {
+  /** Sibling hash to combine with the running node at this level. */
+  hash: string;
+  /** True when the sibling is the LEFT operand: parent = SHA-256(sibling + node). */
+  left: boolean;
+}
+
+// Inclusion proofs for the SAME tree buildMerkleRoot produces (leaf = SHA-256(id|chainHash),
+// leaves sorted by id asc, odd layers duplicate the last node). Returns the root plus, per
+// leaf id, the sibling path that folds that leaf back to the root.
+//
+// Why this exists (Day-5 security fix): a dossier is a subject-filtered SUBSET of a notarized
+// batch, and every record in a batch is stamped with the same (merkle_root, notary_sig). A
+// verifier that only checks "is this signature valid over this root" proves nothing about
+// whether a given record is actually in that root — all chain_hash preimage fields are public,
+// so anyone could fabricate records and staple a borrowed genuine (root, sig) pair onto them.
+// The inclusion proof closes that: a record counts as notarized only if its leaf provably
+// folds to the signed root, which requires it to have truly been in the batch.
+export async function buildMerkleProofs(
+  leaves: Array<{ id: string; chainHash: string }>,
+): Promise<{ root: string; proofs: Map<string, MerkleProofStep[]> }> {
+  if (leaves.length === 0) throw new Error("empty leaves");
+  const sorted = [...leaves].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  let layer: string[] = await Promise.all(
+    sorted.map((leaf) => sha256Hex(`${leaf.id}|${leaf.chainHash}`)),
+  );
+  const proofs = new Map<string, MerkleProofStep[]>();
+  const indices = new Map<string, number>();
+  sorted.forEach((leaf, i) => {
+    proofs.set(leaf.id, []);
+    indices.set(leaf.id, i);
+  });
+
+  while (layer.length > 1) {
+    // Record each leaf's sibling at this level BEFORE collapsing to the next.
+    for (const leaf of sorted) {
+      const idx = indices.get(leaf.id) as number;
+      const step: MerkleProofStep =
+        idx % 2 === 0
+          ? { hash: (layer[idx + 1] ?? layer[idx]) as string, left: false }
+          : { hash: layer[idx - 1] as string, left: true };
+      (proofs.get(leaf.id) as MerkleProofStep[]).push(step);
+      indices.set(leaf.id, Math.floor(idx / 2));
+    }
+    const next: string[] = [];
+    for (let i = 0; i < layer.length; i += 2) {
+      const left = layer[i] as string;
+      const right = layer[i + 1] ?? left;
+      next.push(await sha256Hex(left + right));
+    }
+    layer = next;
+  }
+  return { root: layer[0] as string, proofs };
+}

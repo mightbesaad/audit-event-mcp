@@ -32,19 +32,50 @@ async function kjrSha256Hex(subtle, text) {
     .join("");
 }
 
+// Folds a Merkle inclusion proof from a leaf up to a root, mirroring buildMerkleProofs:
+// sibling on the left → SHA-256(sibling + node), on the right → SHA-256(node + sibling).
+// Returns the computed root hex, or null if the proof is missing/malformed.
+async function kjrFoldProof(subtle, leafHash, proof) {
+  if (!Array.isArray(proof)) return null;
+  var node = leafHash;
+  for (var i = 0; i < proof.length; i++) {
+    var step = proof[i];
+    if (!step || typeof step.hash !== "string" || /[^0-9a-f]/.test(step.hash) ||
+        step.hash.length !== 64) {
+      return null;
+    }
+    node = step.left
+      ? await kjrSha256Hex(subtle, step.hash + node)
+      : await kjrSha256Hex(subtle, node + step.hash);
+  }
+  return node;
+}
+
 // Pure verifier. Returns a report object; never throws on hostile input.
 // Checks, in order:
 //   1. parse        — the file is well-formed JSONL with the dossier fields
 //   2. fingerprints — each record's chain_hash recomputes from its preimage
 //                     (id | event_type | input_hash ?? omitted_reason | prev_hash)
-//   3. notary       — every (merkle_root, notary_sig) pair verifies as Ed25519 over the
-//                     root bytes against the published notary public key
+//   3. notary       — for every record that claims notarization (carries merkle_root +
+//                     notary_sig), BOTH must hold: its merkle_proof folds to that root
+//                     (the record was really in the signed batch), AND the root's
+//                     Ed25519 signature verifies against the published notary key. A
+//                     borrowed-but-genuine signature stapled onto fabricated records
+//                     fails the inclusion half — the record is not in the tree it claims.
 async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
   var report = {
     parse: { ok: false, count: 0 },
     fingerprints: { checked: 0, passed: 0, failed: [], uncheckable: 0 },
     linkage: { linked: 0 },
-    notary: { attestedRecords: 0, roots: 0, verifiedRoots: 0, failedRoots: [], keyUsable: true },
+    notary: {
+      claimedRecords: 0,
+      attestedRecords: 0,
+      roots: 0,
+      verifiedRoots: 0,
+      failedRoots: [],
+      brokenInclusion: [],
+      keyUsable: true,
+    },
     verdict: "invalid",
   };
 
@@ -82,17 +113,24 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
     if (i > 0 && r.prev_hash === rows[i - 1].chain_hash) report.linkage.linked++;
   }
 
+  // A record "claims notarization" only if it carries BOTH merkle_root and notary_sig.
+  // Collect the distinct (root → sig) it claims; a lone field is ignored (treated as not
+  // notarized) rather than trusted.
   var rootSigs = new Map();
+  var claimed = [];
   for (var j = 0; j < rows.length; j++) {
     var row2 = rows[j];
     if (typeof row2.merkle_root === "string" && typeof row2.notary_sig === "string") {
-      report.notary.attestedRecords++;
-      rootSigs.set(row2.merkle_root, row2.notary_sig);
+      report.notary.claimedRecords++;
+      claimed.push(row2);
+      if (!rootSigs.has(row2.merkle_root)) rootSigs.set(row2.merkle_root, row2.notary_sig);
     }
   }
   report.notary.roots = rootSigs.size;
 
   if (rootSigs.size > 0) {
+    // Step A — verify each distinct root's Ed25519 signature (needs the published key).
+    var rootValid = new Map();
     var pubBytes = kjrHexToBytes(pubkeyHex || "");
     var key = null;
     if (pubBytes && pubBytes.length === 32) {
@@ -108,9 +146,8 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
       var entries = Array.from(rootSigs.entries());
       for (var k = 0; k < entries.length; k++) {
         var root = entries[k][0];
-        var sig = entries[k][1];
         var rootBytes = kjrHexToBytes(root);
-        var sigBytes = kjrHexToBytes(sig);
+        var sigBytes = kjrHexToBytes(entries[k][1]);
         var ok = false;
         if (rootBytes && sigBytes) {
           try {
@@ -119,24 +156,43 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
             ok = false;
           }
         }
-        if (ok) {
-          report.notary.verifiedRoots++;
-        } else {
-          report.notary.failedRoots.push(root);
-        }
+        rootValid.set(root, ok);
+        if (ok) report.notary.verifiedRoots++;
+        else report.notary.failedRoots.push(root);
+      }
+    }
+
+    // Step B — for each claiming record, fold its inclusion proof to its claimed root. This
+    // is what stops a borrowed genuine signature from validating fabricated records: the
+    // fold needs the record's leaf to actually sit under the signed root. Independent of the
+    // key, so it still runs (and can still fail "broken") when the key is unusable.
+    for (var m = 0; m < claimed.length; m++) {
+      var cr = claimed[m];
+      var leaf = await kjrSha256Hex(subtle, cr.id + "|" + cr.chain_hash);
+      var folded = await kjrFoldProof(subtle, leaf, cr.merkle_proof);
+      var inclusionOk = folded !== null && folded === cr.merkle_root;
+      if (!inclusionOk) {
+        report.notary.brokenInclusion.push(cr.id);
+        continue;
+      }
+      if (report.notary.keyUsable && rootValid.get(cr.merkle_root) === true) {
+        report.notary.attestedRecords++;
       }
     }
   }
 
-  var tampered = report.fingerprints.failed.length > 0 || report.notary.failedRoots.length > 0;
+  var tampered =
+    report.fingerprints.failed.length > 0 ||
+    report.notary.failedRoots.length > 0 ||
+    report.notary.brokenInclusion.length > 0;
   var allFingerprintsPass =
     report.fingerprints.uncheckable === 0 &&
     report.fingerprints.passed === report.parse.count;
   if (tampered) {
     report.verdict = "failed";
-  } else if (!report.notary.keyUsable) {
+  } else if (report.notary.claimedRecords > 0 && !report.notary.keyUsable) {
     report.verdict = "unverifiable";
-  } else if (allFingerprintsPass && report.notary.verifiedRoots > 0) {
+  } else if (allFingerprintsPass && report.notary.attestedRecords > 0) {
     report.verdict = "verified";
   } else if (allFingerprintsPass) {
     report.verdict = "unattested";
@@ -197,20 +253,28 @@ if (typeof document !== "undefined") {
           r.fingerprints.passed + " of " + r.parse.count + ").");
       }
 
-      if (r.notary.roots === 0) {
+      if (r.notary.brokenInclusion.length > 0) {
+        addTick(false, "Notary inclusion check FAILED for " + r.notary.brokenInclusion.length +
+          " record(s): they carry a notary signature but are NOT inside the batch it signed — " +
+          "the hallmark of a genuine signature stapled onto records that were never witnessed.");
+      }
+      if (r.notary.claimedRecords === 0) {
         addTick(null, "No notary signatures present yet — records are notarized in batches (≤ 15 min).");
       } else if (!r.notary.keyUsable) {
         addTick(null, "Could not check notary signatures: the notary key was unavailable or this browser lacks Ed25519 support (use a current Chrome, Firefox, or Safari).");
       } else if (r.notary.failedRoots.length > 0) {
         addTick(false, "Notary signature verification FAILED for " + r.notary.failedRoots.length + " batch root(s).");
-      } else {
-        addTick(true, "All notary signatures verify against the published kajaril notary key (" +
+      } else if (r.notary.brokenInclusion.length === 0) {
+        addTick(true, "Every notarized record proves it was inside a batch signed by the kajaril " +
+          "notary, and all signatures verify against the published key (" +
           r.notary.attestedRecords + " of " + r.parse.count + " records attested across " +
           r.notary.roots + " batch" + (r.notary.roots === 1 ? "" : "es") + ").");
       }
 
       if (r.verdict === "verified") {
-        setVerdict("pass", "Verified: this dossier has not been altered since it was witnessed, and its notary signatures are genuine.");
+        setVerdict("pass", "Verified: every notarized record proves it was inside a batch the kajaril " +
+          "notary signed, and the record's chain fingerprint is intact. (Coverage is the event id, " +
+          "type, and input/previous digests — the fields committed to the chain.)");
       } else if (r.verdict === "unattested") {
         setVerdict("warn", "Internally consistent, but not yet notarized — every fingerprint checks out; notary signatures will cover these records after the next batch.");
       } else if (r.verdict === "unverifiable") {
