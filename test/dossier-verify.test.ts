@@ -304,6 +304,54 @@ describe("the /verify.js core — against real chains and real signatures", () =
     db.close();
   });
 
+  // Duplicate-id hardening (re-review): the rider reuses a GENUINE row's id instead of a fresh
+  // one. The verdict was already safe (count-based), but unattestedIds must be computed by row,
+  // not id-membership — otherwise the rider hides and the green "all attested" tick fires above
+  // the yellow banner. Assert the row-accurate invariant.
+  it("flags an un-notarized rider even when it reuses a genuine row's id", async () => {
+    const { jsonl, db } = await buildDossierFixture({ notarize: true });
+    const genuine = jsonl.trim().split("\n");
+    const stolenId = (JSON.parse(genuine[0] as string) as { id: string }).id;
+
+    const sha256Hex = async (text: string) =>
+      Array.from(
+        new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
+      )
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+
+    const slot = "22".repeat(32);
+    const fabChain = await sha256Hex(`${stolenId}|tool.call|${slot}|`);
+    const rider = {
+      id: stolenId, // reuses a genuine, attested row's id
+      agent_id: "attacker",
+      session_id: "s",
+      event_type: "tool.call",
+      input_hash: slot,
+      input_hash_omitted_reason: null,
+      lawful_basis: null,
+      purpose: "transfer 1,000,000 — totally approved",
+      subject_id: "user-1",
+      retention_days: 365,
+      prev_hash: null,
+      chain_hash: fabChain,
+      created_at: "2026-06-13T00:00:00.000Z",
+    };
+
+    const mixed = `${genuine.join("\n")}\n${JSON.stringify(rider)}\n`;
+    const report = await verifyDossier(mixed, NOTARY_PUB_HEX, crypto.subtle);
+
+    expect(report.parse.count).toBe(4);
+    expect(report.notary.attestedRecords).toBe(3);
+    // strictly less → the green "all attested" tick stays yellow, not a contradictory green ✓
+    expect(report.notary.attestedRecords).toBeLessThan(report.parse.count);
+    // row-accurate, not id-membership: one unproven row even though its id collides
+    expect(report.notary.unattestedIds.length).toBe(report.parse.count - report.notary.attestedRecords);
+    expect(report.notary.unattestedIds).toContain(stolenId);
+    expect(report.verdict).toBe("partially_attested");
+    db.close();
+  });
+
   it("never throws on garbage input", async () => {
     for (const garbage of ["", "not json", '{"id": 1}', "[1,2,3]", " "]) {
       const report = await verifyDossier(garbage, NOTARY_PUB_HEX, crypto.subtle);

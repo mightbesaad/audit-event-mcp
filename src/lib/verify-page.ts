@@ -132,7 +132,7 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
   }
   report.notary.roots = rootSigs.size;
 
-  var attestedIds = [];
+  var attestedSet = new Set();
   if (rootSigs.size > 0) {
     // Step A — verify each distinct root's Ed25519 signature (needs the published key).
     var rootValid = new Map();
@@ -182,16 +182,18 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
       }
       if (report.notary.keyUsable && rootValid.get(cr.merkle_root) === true) {
         report.notary.attestedRecords++;
-        attestedIds.push(cr.id);
+        attestedSet.add(cr);
       }
     }
   }
 
   // Every parsed row not provably attested (no proof folding under a verified root) — named
   // so the verdict can flag un-notarized rows an attacker may have appended to a genuine
-  // dossier. A record counts as proven only if it appears in attestedIds.
+  // dossier. Tracked by row REFERENCE, not id: a hostile file may reuse a genuine row's id,
+  // and an id-membership test would then miss the rider, leaving the count and the named
+  // list disagreeing (and a contradictory green tick).
   for (var u = 0; u < rows.length; u++) {
-    if (attestedIds.indexOf(rows[u].id) === -1) report.notary.unattestedIds.push(rows[u].id);
+    if (!attestedSet.has(rows[u])) report.notary.unattestedIds.push(rows[u].id);
   }
 
   var tampered =
@@ -283,11 +285,12 @@ if (typeof document !== "undefined") {
         addTick(null, "Could not check notary signatures: the notary key was unavailable or this browser lacks Ed25519 support (use a current Chrome, Firefox, or Safari).");
       } else if (r.notary.failedRoots.length > 0) {
         addTick(false, "Notary signature verification FAILED for " + r.notary.failedRoots.length + " batch root(s).");
-      } else if (r.notary.brokenInclusion.length === 0 && r.notary.unattestedIds.length > 0) {
-        addTick(null, r.notary.unattestedIds.length + " of " + r.parse.count + " record(s) carry NO " +
-          "notary signature and are NOT proven by kajaril — treat as unverified claims: " +
-          r.notary.unattestedIds.join(", ") + ". The other " + r.notary.attestedRecords +
-          " verify against the published key.");
+      } else if (r.notary.brokenInclusion.length === 0 && r.notary.attestedRecords < r.parse.count) {
+        addTick(null, (r.parse.count - r.notary.attestedRecords) + " of " + r.parse.count +
+          " record(s) carry no notary signature yet — not proven by kajaril. If you exported this " +
+          "before the next batch (≤ 15 min) they may simply be pending; otherwise treat them as " +
+          "unverified claims: " + r.notary.unattestedIds.join(", ") + ". The other " +
+          r.notary.attestedRecords + " verify against the published key.");
       } else if (r.notary.brokenInclusion.length === 0) {
         addTick(true, "Every record proves it was inside a batch signed by the kajaril " +
           "notary, and all signatures verify against the published key (" +
@@ -302,9 +305,10 @@ if (typeof document !== "undefined") {
       } else if (r.verdict === "partially_attested") {
         setVerdict("warn", "Partially attested — NOT fully verified: " + r.notary.attestedRecords +
           " of " + r.parse.count + " records are proven witnessed by the kajaril notary; the other " +
-          r.notary.unattestedIds.length + " carry no signature and are NOT proven (anyone can append " +
-          "such rows). Do not rely on the un-notarized records listed above; re-verify after the next " +
-          "batch if they are expected to be notarized.");
+          (r.parse.count - r.notary.attestedRecords) + " carry no signature and are not proven. " +
+          "Newly-exported dossiers may have pending rows — re-verify after the next batch (≤ 15 min). " +
+          "If they stay un-notarized, treat them as unverified claims (an un-notarized row is not " +
+          "evidence; anyone can add one).");
       } else if (r.verdict === "unattested") {
         setVerdict("warn", "Internally consistent, but not yet notarized — every fingerprint checks out; notary signatures will cover these records after the next batch.");
       } else if (r.verdict === "unverifiable") {
