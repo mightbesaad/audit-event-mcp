@@ -106,6 +106,12 @@ export interface Env {
   // Signing key for M2M access tokens (D2), a Workers Secret. Unset → /oauth/token and
   // Bearer auth fail closed (503): a token we cannot verify must never select a tenant.
   M2M_TOKEN_SIGNING_SECRET?: string;
+  // Storage for the browser OAuth flow (D11): workers-oauth-provider keeps DCR'd clients,
+  // grants, and token hashes here. Routing/auth state only, never evidence. Unset → the
+  // authorization_code / refresh_token branch of /oauth/token, /oauth/register, and
+  // browser-token Bearer auth all fail closed (503); client_credentials is unaffected.
+  // Deploy day: create-and-bind alongside CHANNELS_KV (D11 condition 6).
+  OAUTH_KV?: KVNamespace;
   // Channel routing config (D4): connect codes, telegram chat bindings, approver email.
   // Bound to BOTH workers — the go worker's Telegram webhook resolves chat → tenant here.
   // Mutable routing state only, never evidence: nothing in this KV is witnessed material,
