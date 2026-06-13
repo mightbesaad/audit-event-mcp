@@ -56,6 +56,7 @@ type VerifyReport = {
     verifiedRoots: number;
     failedRoots: string[];
     brokenInclusion: string[];
+    unattestedIds: string[];
     keyUsable: boolean;
   };
   verdict: string;
@@ -252,6 +253,54 @@ describe("the /verify.js core — against real chains and real signatures", () =
     );
     expect(bogusProof.notary.brokenInclusion).toContain(fabId);
     expect(bogusProof.verdict).toBe("failed");
+    db.close();
+  });
+
+  // THE mixed-file variant the inclusion-proof fix alone does NOT stop (caught in re-review,
+  // missed by the self-review): an attacker appends fabricated rows carrying NO signature — so
+  // they are never inclusion-checked — to a genuine, fully-attested dossier. Fingerprints pass
+  // and the real rows are attested; under the old logic (attestedRecords > 0) that was a green
+  // "verified". The verdict must instead be "partially_attested", naming the un-notarized rows.
+  it("does not green-light fabricated un-notarized rows riding a genuine attested dossier", async () => {
+    const { jsonl, db } = await buildDossierFixture({ notarize: true });
+    const genuine = jsonl.trim().split("\n");
+
+    const sha256Hex = async (text: string) =>
+      Array.from(
+        new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
+      )
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+
+    const fabId = "fabricated-rider-0001";
+    const slot = "11".repeat(32);
+    const fabChain = await sha256Hex(`${fabId}|tool.call|${slot}|`); // matches computeChainHash
+    const fabricated = {
+      id: fabId,
+      agent_id: "attacker",
+      session_id: "s",
+      event_type: "tool.call",
+      input_hash: slot,
+      input_hash_omitted_reason: null,
+      lawful_basis: null,
+      purpose: "transfer 1,000,000 — totally approved",
+      subject_id: "user-1",
+      retention_days: 365,
+      prev_hash: null,
+      chain_hash: fabChain,
+      // deliberately NO merkle_root / notary_sig — rides as an "un-notarized" row
+      created_at: "2026-06-13T00:00:00.000Z",
+    };
+
+    const mixed = `${genuine.join("\n")}\n${JSON.stringify(fabricated)}\n`;
+    const report = await verifyDossier(mixed, NOTARY_PUB_HEX, crypto.subtle);
+
+    expect(report.parse.count).toBe(4);
+    expect(report.fingerprints.failed).toEqual([]); // the fabricated row is self-consistent
+    expect(report.notary.brokenInclusion).toEqual([]); // it never claims a root, so never "broken"
+    expect(report.notary.attestedRecords).toBe(3); // only the genuine rows
+    expect(report.notary.unattestedIds).toContain(fabId);
+    expect(report.verdict).toBe("partially_attested"); // NOT "verified"
     db.close();
   });
 

@@ -62,6 +62,9 @@ async function kjrFoldProof(subtle, leafHash, proof) {
 //                     Ed25519 signature verifies against the published notary key. A
 //                     borrowed-but-genuine signature stapled onto fabricated records
 //                     fails the inclusion half — the record is not in the tree it claims.
+//                     "verified" further requires EVERY record to be so attested; a file
+//                     mixing genuine attested rows with un-notarized ones is
+//                     "partially_attested", never green (un-notarized rows are not proof).
 async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
   var report = {
     parse: { ok: false, count: 0 },
@@ -74,6 +77,7 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
       verifiedRoots: 0,
       failedRoots: [],
       brokenInclusion: [],
+      unattestedIds: [],
       keyUsable: true,
     },
     verdict: "invalid",
@@ -128,6 +132,7 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
   }
   report.notary.roots = rootSigs.size;
 
+  var attestedIds = [];
   if (rootSigs.size > 0) {
     // Step A — verify each distinct root's Ed25519 signature (needs the published key).
     var rootValid = new Map();
@@ -177,8 +182,16 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
       }
       if (report.notary.keyUsable && rootValid.get(cr.merkle_root) === true) {
         report.notary.attestedRecords++;
+        attestedIds.push(cr.id);
       }
     }
+  }
+
+  // Every parsed row not provably attested (no proof folding under a verified root) — named
+  // so the verdict can flag un-notarized rows an attacker may have appended to a genuine
+  // dossier. A record counts as proven only if it appears in attestedIds.
+  for (var u = 0; u < rows.length; u++) {
+    if (attestedIds.indexOf(rows[u].id) === -1) report.notary.unattestedIds.push(rows[u].id);
   }
 
   var tampered =
@@ -192,8 +205,14 @@ async function kajarilVerifyDossier(text, pubkeyHex, subtle) {
     report.verdict = "failed";
   } else if (report.notary.claimedRecords > 0 && !report.notary.keyUsable) {
     report.verdict = "unverifiable";
-  } else if (allFingerprintsPass && report.notary.attestedRecords > 0) {
+  } else if (allFingerprintsPass && report.notary.attestedRecords === report.parse.count) {
     report.verdict = "verified";
+  } else if (allFingerprintsPass && report.notary.attestedRecords > 0) {
+    // Some rows prove inclusion under a signed root; others carry no signature and are never
+    // inclusion-checked. A green verdict here would let an attacker append fabricated
+    // un-notarized rows to a genuine dossier and ride one real row's attestation — so this is
+    // its own lesser verdict that names the unproven rows.
+    report.verdict = "partially_attested";
   } else if (allFingerprintsPass) {
     report.verdict = "unattested";
   } else {
@@ -264,17 +283,28 @@ if (typeof document !== "undefined") {
         addTick(null, "Could not check notary signatures: the notary key was unavailable or this browser lacks Ed25519 support (use a current Chrome, Firefox, or Safari).");
       } else if (r.notary.failedRoots.length > 0) {
         addTick(false, "Notary signature verification FAILED for " + r.notary.failedRoots.length + " batch root(s).");
+      } else if (r.notary.brokenInclusion.length === 0 && r.notary.unattestedIds.length > 0) {
+        addTick(null, r.notary.unattestedIds.length + " of " + r.parse.count + " record(s) carry NO " +
+          "notary signature and are NOT proven by kajaril — treat as unverified claims: " +
+          r.notary.unattestedIds.join(", ") + ". The other " + r.notary.attestedRecords +
+          " verify against the published key.");
       } else if (r.notary.brokenInclusion.length === 0) {
-        addTick(true, "Every notarized record proves it was inside a batch signed by the kajaril " +
+        addTick(true, "Every record proves it was inside a batch signed by the kajaril " +
           "notary, and all signatures verify against the published key (" +
           r.notary.attestedRecords + " of " + r.parse.count + " records attested across " +
           r.notary.roots + " batch" + (r.notary.roots === 1 ? "" : "es") + ").");
       }
 
       if (r.verdict === "verified") {
-        setVerdict("pass", "Verified: every notarized record proves it was inside a batch the kajaril " +
-          "notary signed, and the record's chain fingerprint is intact. (Coverage is the event id, " +
+        setVerdict("pass", "Verified: every record proves it was inside a batch the kajaril " +
+          "notary signed, and each record's chain fingerprint is intact. (Coverage is the event id, " +
           "type, and input/previous digests — the fields committed to the chain.)");
+      } else if (r.verdict === "partially_attested") {
+        setVerdict("warn", "Partially attested — NOT fully verified: " + r.notary.attestedRecords +
+          " of " + r.parse.count + " records are proven witnessed by the kajaril notary; the other " +
+          r.notary.unattestedIds.length + " carry no signature and are NOT proven (anyone can append " +
+          "such rows). Do not rely on the un-notarized records listed above; re-verify after the next " +
+          "batch if they are expected to be notarized.");
       } else if (r.verdict === "unattested") {
         setVerdict("warn", "Internally consistent, but not yet notarized — every fingerprint checks out; notary signatures will cover these records after the next batch.");
       } else if (r.verdict === "unverifiable") {
