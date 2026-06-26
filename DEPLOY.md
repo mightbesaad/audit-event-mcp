@@ -25,11 +25,14 @@ cd audit-event-mcp
 git checkout main && git pull
 git status            # MUST print "nothing to commit, working tree clean" (repo rule)
 npx wrangler whoami   # account must be 363dfad0…
-npm test              # suite green (323)
+npm test              # suite green (327)
 ```
 
 CI on `main` is green. The kajaril.com zone is on this Cloudflare account (custom domains
 below auto-create DNS records + certs on deploy — no manual DNS steps).
+
+**Have ready before §7:** a `CF_API_TOKEN` with `Workers Scripts:Edit` permission —
+`onboard-client.ts` (the §7 onboarding step) reads it from the shell env and errors out if unset.
 
 ---
 
@@ -68,7 +71,7 @@ apply implicitly on the first `wrangler deploy` — no CLI step.
 `wrangler secret put` prompts on stdin; paste the value, never put it in a command line
 or shell history.
 
-**Notary** (may already exist from earlier scaffolding — putting it again is safe):
+**Notary** — ⚠️ **already LIVE in production** (verified 2026-06-26: `audit-event-notary.kajaril.com/.well-known/notary-pubkey` returns 200) and **unchanged by the witness work**. **Do NOT `put` a new `NOTARY_PRIVATE_KEY` value** — every existing notarized event and `/verify` depends on the current key; rotating it invalidates all prior signatures. Re-putting the *same* value is harmless but unnecessary, so skip this step unless you have confirmed the secret is actually missing:
 
 ```sh
 npx wrangler secret put NOTARY_PRIVATE_KEY --config wrangler.notary.jsonc
@@ -118,6 +121,14 @@ Optional: `APPROVAL_LINK_BASE_URL` — leave unset in production (defaults to
 
 ## 4. Cloudflare Access application
 
+**Confirmed 2026-06-26 — the Access app already EXISTS** and currently covers the whole
+hostname (`/health` returns 403 with `cf-access-aud:
+6ad00a6ef11389a5421f901175cd20901538f1b387049cec1e7e1310dc8f3557`). So this step is **adjust
+the existing app, not create one**, and that AUD is almost certainly the `CF_ACCESS_APP_AUD`
+value — confirm in the dashboard it is the intended app. The path re-scope below (exposing
+`/health` plus the Bearer lanes) is **mandatory**: §7's `/health → 200` and
+`grant_type=bogus → 400` will FAIL until it is done.
+
 Zero Trust dashboard → Access → Applications → add (or confirm) a **self-hosted** app for
 `audit-event.kajaril.com`. Then copy its **AUD tag** (Overview tab) into
 `CF_ACCESS_APP_AUD` (step 3) — the worker pins JWT verification to exactly this app and
@@ -149,9 +160,9 @@ Both policy types on one app share one AUD, which is what the single
 
 ```sh
 git status   # clean tree, again — vars/KV edits from steps 1+3 must be committed
-npx wrangler deploy --config wrangler.notary.jsonc   # 1
+npx wrangler deploy --config wrangler.notary.jsonc   # 1 — likely a no-op: notary already live + unchanged. Confirm via 'wrangler deployments list --config wrangler.notary.jsonc' rather than redeploy blind
 npx wrangler deploy                                  # 2 (gated; migration applies here)
-npx wrangler deploy --config wrangler.go.jsonc       # 3
+npx wrangler deploy --config wrangler.go.jsonc       # 3 — MUST follow step 2's redeploy: go binds the gated worker's witness entrypoints (ApprovalInternal/DossierInternal), absent on a pre-witness base worker
 ```
 
 Register the Telegram webhook (after step 2+3 secrets and the go deploy):
@@ -200,6 +211,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://audit-event.kajaril.com/oauth/a
 #   302 to the Access login ← proves Access IS intercepting consent
 
 # first tenant, full loop (uses the founder's phone)
+# prerequisite: CF_API_TOKEN (Workers Scripts:Edit) exported in this shell
 npx tsx src/scripts/onboard-client.ts --client-id pilot-1 --tier free --region eu
 #   then follow its printed steps: service token + custom.client_id claim,
 #   /credentials/rotate bootstrap (admin + agent), keep the one-time secrets.
