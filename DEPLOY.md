@@ -39,8 +39,10 @@ below auto-create DNS records + certs on deploy — no manual DNS steps).
 ## 1. Platform resources (create once)
 
 ```sh
-# R2 bucket (shared; per-client isolation is key-prefix based — locked decision)
-npx wrangler r2 bucket create audit-payloads
+# R2 bucket (shared; per-client isolation is key-prefix based — locked decision).
+# EU-jurisdiction pinned (locked decision 12, 2026-07-10) — already created; this
+# line is here for reference, not a step to re-run.
+npx wrangler r2 bucket create audit-payloads-eu --jurisdiction eu
 
 # KV namespaces
 npx wrangler kv namespace create CHANNELS_KV     # → prints id A

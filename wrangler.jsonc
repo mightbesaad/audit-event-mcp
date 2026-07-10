@@ -1,114 +1,129 @@
 {
-  "name": "audit-event-mcp",
-  // src/main.ts wraps src/index.ts unchanged and adds the ApprovalInternal named entrypoint —
-  // the ONLY surface the public go.kajaril.com worker (wrangler.go.jsonc) can reach, via its
-  // service binding. Named entrypoints have no HTTP route: public human surfaces live on the
-  // separate go worker (decision D1), never as a path bypass on this gated worker.
-  "main": "src/main.ts",
-  "compatibility_date": "2026-02-24",
-  // Disable the *.workers.dev URL: tenant isolation depends on requests arriving through the
-  // CF Access policy bound to the custom domain. A live workers.dev URL bypasses that policy,
-  // so the only host for this Worker is audit-event.kajaril.com (route below).
-  "workers_dev": false,
-  // account_id omitted — Wrangler infers from auth context.
-  // Never commit account_id to this public repo.
-  // Cloudflare Access team domain — the Worker fetches its JWKS from
-  // https://<this>/cdn-cgi/access/certs to verify the CF-Access-Jwt-Assertion on /mcp.
-  // With it unset, /mcp fails closed (503) instead of trusting an unverified token.
-  "vars": {
-    "CF_ACCESS_TEAM_DOMAIN": "aged-limit-247a.cloudflareaccess.com"
-    // CF_ACCESS_APP_AUD — DEPLOY DAY: set to the AUD tag of the Access application that
-    // protects audit-event.kajaril.com (Zero Trust dashboard → Access → Applications →
-    // Overview tab). Pins verifyJwt to OUR app: every app on the team domain shares the
-    // same signing keys, so an unpinned aud would accept tokens minted for any of them.
-    // Unset → CF Access auth fails closed (503).
-    // APPROVAL_LINK_BASE_URL — optional override for where approval links point;
-    // defaults in code to https://go.kajaril.com (the go worker, decision D1).
-    // TELEGRAM_BOT_USERNAME — DEPLOY DAY: the bot's public @username (no @), used to build
-    // t.me connect deep links. Public information, hence a var. Unset → POST
-    // /channels/telegram/connect returns 503.
-  },
-  // CHANNELS_KV — channel routing config (D4): telegram connect codes + chat bindings and
-  // the approver email. Routing state only, never evidence. The SAME namespace must be
-  // bound to the go worker (wrangler.go.jsonc) — its Telegram webhook resolves chat →
-  // tenant here.
-  // OAUTH_KV — browser OAuth flow storage (D11 condition 6): workers-oauth-provider keeps
-  // DCR'd clients, grants, and token hashes here. This worker only; the go worker never
-  // sees it. Unset → authorization_code/refresh_token, /oauth/register, and browser-token
-  // Bearer auth fail closed (503); client_credentials is unaffected. DEPLOY DAY:
-  //   npx wrangler kv namespace create CHANNELS_KV
-  //   npx wrangler kv namespace create OAUTH_KV
-  // then uncomment with the printed ids, mirroring CHANNELS_KV into wrangler.go.jsonc:
-  // "kv_namespaces": [
-  //   { "binding": "CHANNELS_KV", "id": "<from create command>" },
-  //   { "binding": "OAUTH_KV", "id": "<from create command>" }
-  // ],
-  // DO namespace created implicitly on first `wrangler deploy` — no separate CLI command needed.
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "AUDIT_DO",
-        "class_name": "AuditDO"
-      }
-    ]
-  },
-  // new_sqlite_classes — not new_classes — required for DO SQLite API (decision build-plan).
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["AuditDO"]
-    }
-  ],
-  // Shared R2 bucket. Per-client isolation enforced by key prefix {client_id}/{event_id} in do.ts.
-  // Never per-client buckets — bindings are static; prefix isolation is sufficient (decision build-plan).
-  // EU-jurisdiction bucket (decision, see CLAUDE.md locked decisions) — created via
-  // `wrangler r2 bucket create audit-payloads-eu --jurisdiction eu`. Binding name unchanged,
-  // so no code references this bucket by name and needs to change.
-  "r2_buckets": [
-    {
-      "binding": "AUDIT_PAYLOADS",
-      "bucket_name": "audit-payloads-eu"
-    }
-  ],
-  "services": [
-    { "binding": "NOTARY", "service": "audit-event-notary" }
-  ],
-  // Per-tenant cap on approval creations (donor pattern from gvnr): each approval costs DO
-  // writes, a chain event, and (Day 4) a channel send — shared capacity one tenant or one
-  // buggy agent must not drain. "unsafe" is Cloudflare's name for the ratelimit binding
-  // type, not a safety judgement.
-  "unsafe": {
-    "bindings": [
-      {
-        "name": "APPROVAL_RATE_LIMITER",
-        "type": "ratelimit",
-        "namespace_id": "1001",
-        "simple": { "limit": 30, "period": 60 }
-      }
-    ]
-  },
-  // Secrets (wrangler secret put):
-  //   WEBHOOK_SIGNING_SECRET — master for per-tenant decision-webhook signing keys (D9,
-  //   HKDF-derived per clientId). High-entropy random string. Unset → webhooks are not
-  //   sent (fail closed, never unsigned) and request_approval returns webhookSecret: null.
-  //   Rotation rotates every tenant's secret at once; customers re-read it from the next
-  //   request_approval response.
-  //   APPROVAL_TOKEN_SECRET — HMAC key for approval link tokens (D3). MUST hold the same
-  //   value as the go worker's secret of the same name: that worker verifies what this one
-  //   mints into request_approval's approval_url. Unset → approvalUrl: null (polling works).
-  //   M2M_TOKEN_SIGNING_SECRET — signing key for OAuth client-credentials access tokens
-  //   (D2). High-entropy random string. Unset → /oauth/token and Bearer auth fail closed
-  //   (503). Rotation invalidates every outstanding access token (clients re-auth within
-  //   the hour); client secrets are unaffected (hashes live in each tenant's DO).
-  //   TELEGRAM_BOT_TOKEN — @BotFather token (D4); this worker sends approval cards with
-  //   it. The SAME value goes to the go worker's secret of the same name (it answers
-  //   callbacks and edits cards). Unset → telegram dispatch reports "unconfigured".
-  //   RESEND_API_KEY — Resend key for the email fallback (D4); read by the tenant DO when
-  //   an escalation alarm fires. Sender identity is pinned in code to
-  //   approvals@send.kajaril.com (verified subdomain, EU region) — never the root domain.
-  //   Unset → email dispatch reports "unconfigured" / escalations record skipped.
-  "observability": {
-    "enabled": true
-  },
-  "routes": [{ "pattern": "audit-event.kajaril.com", "custom_domain": true }]
+	"name": "audit-event-mcp",
+	// src/main.ts wraps src/index.ts unchanged and adds the ApprovalInternal named entrypoint —
+	// the ONLY surface the public go.kajaril.com worker (wrangler.go.jsonc) can reach, via its
+	// service binding. Named entrypoints have no HTTP route: public human surfaces live on the
+	// separate go worker (decision D1), never as a path bypass on this gated worker.
+	"main": "src/main.ts",
+	"compatibility_date": "2026-02-24",
+	// Disable the *.workers.dev URL: tenant isolation depends on requests arriving through the
+	// CF Access policy bound to the custom domain. A live workers.dev URL bypasses that policy,
+	// so the only host for this Worker is audit-event.kajaril.com (route below).
+	"workers_dev": false,
+	// account_id omitted — Wrangler infers from auth context.
+	// Never commit account_id to this public repo.
+	// Cloudflare Access team domain — the Worker fetches its JWKS from
+	// https://<this>/cdn-cgi/access/certs to verify the CF-Access-Jwt-Assertion on /mcp.
+	// With it unset, /mcp fails closed (503) instead of trusting an unverified token.
+	"vars": {
+		"CF_ACCESS_TEAM_DOMAIN": "aged-limit-247a.cloudflareaccess.com",
+		// CF_ACCESS_APP_AUD — confirmed 2026-06-26, re-verified 2026-07-10 (matches the aud
+		// in the CF Access 403 response body from audit-event.kajaril.com/health directly).
+		// Pins verifyJwt to OUR app: every app on the team domain shares the same signing
+		// keys, so an unpinned aud would accept tokens minted for any of them. Unset → CF
+		// Access auth fails closed (503).
+		"CF_ACCESS_APP_AUD": "6ad00a6ef11389a5421f901175cd20901538f1b387049cec1e7e1310dc8f3557",
+		// APPROVAL_LINK_BASE_URL — optional override for where approval links point;
+		// defaults in code to https://go.kajaril.com (the go worker, decision D1).
+		// TELEGRAM_BOT_USERNAME — the bot's public @username (no @), used to build t.me
+		// connect deep links. Public information, hence a var. Unset → POST
+		// /channels/telegram/connect returns 503.
+		"TELEGRAM_BOT_USERNAME": "kajaril_approvals_bot"
+	},
+	// CHANNELS_KV — channel routing config (D4): telegram connect codes + chat bindings and
+	// the approver email. Routing state only, never evidence. The SAME namespace must be
+	// bound to the go worker (wrangler.go.jsonc) — its Telegram webhook resolves chat →
+	// tenant here.
+	// OAUTH_KV — browser OAuth flow storage (D11 condition 6): workers-oauth-provider keeps
+	// DCR'd clients, grants, and token hashes here. This worker only; the go worker never
+	// sees it. Unset → authorization_code/refresh_token, /oauth/register, and browser-token
+	// Bearer auth fail closed (503); client_credentials is unaffected. DEPLOY DAY:
+	//   npx wrangler kv namespace create CHANNELS_KV
+	//   npx wrangler kv namespace create OAUTH_KV
+	// then uncomment with the printed ids, mirroring CHANNELS_KV into wrangler.go.jsonc:
+	// "kv_namespaces": [
+	//   { "binding": "CHANNELS_KV", "id": "<from create command>" },
+	//   { "binding": "OAUTH_KV", "id": "<from create command>" }
+	// ],
+	// DO namespace created implicitly on first `wrangler deploy` — no separate CLI command needed.
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "AUDIT_DO",
+				"class_name": "AuditDO"
+			}
+		]
+	},
+	// new_sqlite_classes — not new_classes — required for DO SQLite API (decision build-plan).
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"AuditDO"
+			]
+		}
+	],
+	// Shared R2 bucket. Per-client isolation enforced by key prefix {client_id}/{event_id} in do.ts.
+	// Never per-client buckets — bindings are static; prefix isolation is sufficient (decision build-plan).
+	// EU-jurisdiction bucket (decision, see CLAUDE.md locked decisions) — created via
+	// `wrangler r2 bucket create audit-payloads-eu --jurisdiction eu`. Binding name unchanged,
+	// so no code references this bucket by name and needs to change.
+	"r2_buckets": [
+		{
+			"binding": "AUDIT_PAYLOADS",
+			"bucket_name": "audit-payloads-eu"
+		}
+	],
+	"services": [
+		{
+			"binding": "NOTARY",
+			"service": "audit-event-notary"
+		}
+	],
+	// Per-tenant cap on approval creations (donor pattern from gvnr): each approval costs DO
+	// writes, a chain event, and (Day 4) a channel send — shared capacity one tenant or one
+	// buggy agent must not drain. "unsafe" is Cloudflare's name for the ratelimit binding
+	// type, not a safety judgement.
+	"unsafe": {
+		"bindings": [
+			{
+				"name": "APPROVAL_RATE_LIMITER",
+				"type": "ratelimit",
+				"namespace_id": "1001",
+				"simple": {
+					"limit": 30,
+					"period": 60
+				}
+			}
+		]
+	},
+	// Secrets (wrangler secret put):
+	//   WEBHOOK_SIGNING_SECRET — master for per-tenant decision-webhook signing keys (D9,
+	//   HKDF-derived per clientId). High-entropy random string. Unset → webhooks are not
+	//   sent (fail closed, never unsigned) and request_approval returns webhookSecret: null.
+	//   Rotation rotates every tenant's secret at once; customers re-read it from the next
+	//   request_approval response.
+	//   APPROVAL_TOKEN_SECRET — HMAC key for approval link tokens (D3). MUST hold the same
+	//   value as the go worker's secret of the same name: that worker verifies what this one
+	//   mints into request_approval's approval_url. Unset → approvalUrl: null (polling works).
+	//   M2M_TOKEN_SIGNING_SECRET — signing key for OAuth client-credentials access tokens
+	//   (D2). High-entropy random string. Unset → /oauth/token and Bearer auth fail closed
+	//   (503). Rotation invalidates every outstanding access token (clients re-auth within
+	//   the hour); client secrets are unaffected (hashes live in each tenant's DO).
+	//   TELEGRAM_BOT_TOKEN — @BotFather token (D4); this worker sends approval cards with
+	//   it. The SAME value goes to the go worker's secret of the same name (it answers
+	//   callbacks and edits cards). Unset → telegram dispatch reports "unconfigured".
+	//   RESEND_API_KEY — Resend key for the email fallback (D4); read by the tenant DO when
+	//   an escalation alarm fires. Sender identity is pinned in code to
+	//   approvals@send.kajaril.com (verified subdomain, EU region) — never the root domain.
+	//   Unset → email dispatch reports "unconfigured" / escalations record skipped.
+	"observability": {
+		"enabled": true
+	},
+	"routes": [
+		{
+			"pattern": "audit-event.kajaril.com",
+			"custom_domain": true
+		}
+	]
 }
