@@ -36,6 +36,12 @@ describe("ApprovalInternal entrypoint", () => {
         get: () => ({
           fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
         }),
+        jurisdiction: () => ({
+          idFromName,
+          get: () => ({
+            fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+          }),
+        }),
       } as unknown as Env["AUDIT_DO"],
     } as Env;
     waited = [];

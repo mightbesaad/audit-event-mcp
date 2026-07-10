@@ -27,7 +27,9 @@ export interface FlowResult {
 // stubFor note in src/main.ts). clientId must already come from a verified source:
 // CF Access JWT today, HMAC link token on the go worker.
 export function tenantStub(env: Env, clientId: string): DurableObjectStub {
-  const doId = env.AUDIT_DO.idFromName(`audit-do-${clientId}`);
+  // EU jurisdiction pin — see CLAUDE.md locked decisions. Same subnamespace as index.ts
+  // and audit-log.ts; all three must agree or a client's DO would resolve to two places.
+  const doId = env.AUDIT_DO.jurisdiction("eu").idFromName(`audit-do-${clientId}`);
   return env.AUDIT_DO.get(doId);
 }
 

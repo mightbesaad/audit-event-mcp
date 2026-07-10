@@ -42,6 +42,12 @@ describe("POST /oauth/token", () => {
         get: () => ({
           fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
         }),
+        jurisdiction: () => ({
+          idFromName,
+          get: () => ({
+            fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+          }),
+        }),
       } as unknown as Env["AUDIT_DO"],
       M2M_TOKEN_SIGNING_SECRET: SIGNING_SECRET,
     } as Env;
@@ -233,6 +239,12 @@ describe("POST /credentials/rotate", () => {
         idFromName: (name: string) => name,
         get: () => ({
           fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+        }),
+        jurisdiction: () => ({
+          idFromName: (name: string) => name,
+          get: () => ({
+            fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+          }),
         }),
       } as unknown as Env["AUDIT_DO"],
       M2M_TOKEN_SIGNING_SECRET: SIGNING_SECRET,

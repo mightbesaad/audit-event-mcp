@@ -50,6 +50,12 @@ describe("MCP dispatch — six tools, Bearer auth, scope enforcement", () => {
         get: () => ({
           fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
         }),
+        jurisdiction: () => ({
+          idFromName: (name: string) => name,
+          get: () => ({
+            fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+          }),
+        }),
       } as unknown as Env["AUDIT_DO"],
       M2M_TOKEN_SIGNING_SECRET: SIGNING_SECRET,
       APPROVAL_TOKEN_SECRET: LINK_SECRET,
@@ -274,6 +280,12 @@ describe("REST approval surface", () => {
         idFromName: (name: string) => name,
         get: () => ({
           fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+        }),
+        jurisdiction: () => ({
+          idFromName: (name: string) => name,
+          get: () => ({
+            fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+          }),
         }),
       } as unknown as Env["AUDIT_DO"],
       M2M_TOKEN_SIGNING_SECRET: SIGNING_SECRET,

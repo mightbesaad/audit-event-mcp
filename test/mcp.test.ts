@@ -172,7 +172,7 @@ describe("POST /mcp — reserved approval.* event types (D7)", () => {
     const env = {
       CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
       CF_ACCESS_APP_AUD: APP_AUD,
-      AUDIT_DO: { idFromName, get: vi.fn() },
+      AUDIT_DO: { idFromName, get: vi.fn(), jurisdiction: () => ({ idFromName, get: vi.fn() }) },
     } as never;
     const req = new Request("https://audit-event.kajaril.com/mcp", {
       method: "POST",
