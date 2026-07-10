@@ -8,7 +8,10 @@ export class AuditLog {
   }
 
   async record(event: AuditEventInput): Promise<RecordResult> {
-    const id = this.config.doNamespace.idFromName(`audit-do-${this.config.clientId}`);
+    // EU jurisdiction pin — see CLAUDE.md locked decisions; must match index.ts / approval-flow.ts.
+    const id = this.config.doNamespace
+      .jurisdiction("eu")
+      .idFromName(`audit-do-${this.config.clientId}`);
     const stub = this.config.doNamespace.get(id);
     const response = await stub.fetch("https://do-internal/record", {
       method: "POST",

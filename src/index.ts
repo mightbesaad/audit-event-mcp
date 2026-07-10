@@ -989,7 +989,9 @@ app.post("/mcp", async (c) => {
       return c.json({ jsonrpc: "2.0", id: body.id, result: flow.body }, flow.status as 200);
     }
 
-    const doId = c.env.AUDIT_DO.idFromName(`audit-do-${clientId}`);
+    // EU jurisdiction pin (decision, see CLAUDE.md locked decisions): every tenant DO is
+    // created within the eu subnamespace so its storage never leaves EU data centers.
+    const doId = c.env.AUDIT_DO.jurisdiction("eu").idFromName(`audit-do-${clientId}`);
     const stub = c.env.AUDIT_DO.get(doId);
 
     try {

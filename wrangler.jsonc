@@ -61,10 +61,13 @@
   ],
   // Shared R2 bucket. Per-client isolation enforced by key prefix {client_id}/{event_id} in do.ts.
   // Never per-client buckets — bindings are static; prefix isolation is sufficient (decision build-plan).
+  // EU-jurisdiction bucket (decision, see CLAUDE.md locked decisions) — created via
+  // `wrangler r2 bucket create audit-payloads-eu --jurisdiction eu`. Binding name unchanged,
+  // so no code references this bucket by name and needs to change.
   "r2_buckets": [
     {
       "binding": "AUDIT_PAYLOADS",
-      "bucket_name": "audit-payloads"
+      "bucket_name": "audit-payloads-eu"
     }
   ],
   "services": [

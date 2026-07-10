@@ -36,6 +36,12 @@ describe("requestApproval flow", () => {
         get: () => ({
           fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
         }),
+        jurisdiction: () => ({
+          idFromName,
+          get: () => ({
+            fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+          }),
+        }),
       } as unknown as Env["AUDIT_DO"],
     } as Env;
   });
@@ -139,6 +145,12 @@ describe("requestApproval — channel ladder dispatch", () => {
         idFromName: (name: string) => name,
         get: () => ({
           fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+        }),
+        jurisdiction: () => ({
+          idFromName: (name: string) => name,
+          get: () => ({
+            fetch: (url: string, init?: RequestInit) => do_.fetch(new Request(url, init)),
+          }),
         }),
       } as unknown as Env["AUDIT_DO"],
       CHANNELS_KV: kv,

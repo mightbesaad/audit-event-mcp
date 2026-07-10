@@ -31,6 +31,7 @@ These live in the workspace `.context/` folder, not in this repo. Deviating from
 9. **`NOTARY_PRIVATE_KEY` is a Workers Secret** — set via `wrangler secret put`, never in source, comments, or commits.
 10. **`migrations/0001_init.sql` is applied by `do.ts`** — the DO constructor calls `state.storage.sql.exec(SCHEMA_SQL)`. Never apply via `wrangler d1 migrations apply`.
 11. **License + metadata** — MIT. `package.json` author, repository, homepage, bugs are locked.
+12. **EU jurisdiction pin (2026-07-10)** — every tenant DO is created via `env.AUDIT_DO.jurisdiction("eu")` before `.idFromName(...)`, never the raw binding. All three call sites (`src/index.ts`, `src/lib/approval-flow.ts`, `src/lib/audit-log.ts`) must agree — a client whose ID is ever derived without the jurisdiction call would resolve to a different DO than one derived with it, silently splitting that tenant's chain in two. The R2 side needed no code change: `AUDIT_PAYLOADS` binding now points at `audit-payloads-eu` (created via `wrangler r2 bucket create audit-payloads-eu --jurisdiction eu`) instead of the original non-jurisdictional `audit-payloads` bucket — binding name unchanged, so nothing in `do.ts`/`main.ts` had to change. Decided with zero pilot clients on the old bucket/namespace, so no data migration was needed; if that's no longer true when this is read, check first.
 
 ## Deploy safety rule
 
