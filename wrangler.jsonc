@@ -33,18 +33,15 @@
 	// CHANNELS_KV — channel routing config (D4): telegram connect codes + chat bindings and
 	// the approver email. Routing state only, never evidence. The SAME namespace must be
 	// bound to the go worker (wrangler.go.jsonc) — its Telegram webhook resolves chat →
-	// tenant here.
+	// tenant here. Created 2026-07-11.
 	// OAUTH_KV — browser OAuth flow storage (D11 condition 6): workers-oauth-provider keeps
 	// DCR'd clients, grants, and token hashes here. This worker only; the go worker never
 	// sees it. Unset → authorization_code/refresh_token, /oauth/register, and browser-token
-	// Bearer auth fail closed (503); client_credentials is unaffected. DEPLOY DAY:
-	//   npx wrangler kv namespace create CHANNELS_KV
-	//   npx wrangler kv namespace create OAUTH_KV
-	// then uncomment with the printed ids, mirroring CHANNELS_KV into wrangler.go.jsonc:
-	// "kv_namespaces": [
-	//   { "binding": "CHANNELS_KV", "id": "<from create command>" },
-	//   { "binding": "OAUTH_KV", "id": "<from create command>" }
-	// ],
+	// Bearer auth fail closed (503); client_credentials is unaffected. Created 2026-07-11.
+	"kv_namespaces": [
+		{ "binding": "CHANNELS_KV", "id": "95e8cff0d77e4455b2a494920e767292" },
+		{ "binding": "OAUTH_KV", "id": "cb34ae2472d846a89da04a9037273c8d" }
+	],
 	// DO namespace created implicitly on first `wrangler deploy` — no separate CLI command needed.
 	"durable_objects": {
 		"bindings": [
