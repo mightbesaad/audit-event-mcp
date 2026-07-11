@@ -11,10 +11,7 @@ const { DatabaseSync: DBSync } = await import("node:sqlite");
 const SIGNING_SECRET = "test-m2m-signing-secret";
 const CLIENT_ID = "client-test";
 
-function tokenRequest(
-  body: Record<string, string>,
-  headers: Record<string, string> = {},
-): Request {
+function tokenRequest(body: Record<string, string>, headers: Record<string, string> = {}): Request {
   return new Request("https://audit-event.kajaril.com/oauth/token", {
     method: "POST",
     headers,
@@ -58,7 +55,9 @@ describe("POST /oauth/token", () => {
   });
 
   async function seedCredential(scope: "agent" | "admin", secret: string): Promise<void> {
-    const res = await do_.fetch(post("/credential/set", { scope, secretHash: await sha256Hex(secret) }));
+    const res = await do_.fetch(
+      post("/credential/set", { scope, secretHash: await sha256Hex(secret) }),
+    );
     expect(res.status).toBe(200);
   }
 
@@ -168,9 +167,7 @@ describe("POST /oauth/token", () => {
     for (const grant of unsupported) {
       const wrongGrant = await worker.fetch(tokenRequest(grant), env, {} as never);
       expect(wrongGrant.status).toBe(400);
-      expect(((await wrongGrant.json()) as { error: string }).error).toBe(
-        "unsupported_grant_type",
-      );
+      expect(((await wrongGrant.json()) as { error: string }).error).toBe("unsupported_grant_type");
     }
 
     for (const scope of [undefined, "root", "agent admin"]) {

@@ -331,7 +331,9 @@ describe("AuditDO", () => {
     expect(first.rotated_at).toBeNull();
 
     await do_.fetch(post("/credential/set", { scope: "agent", secretHash: "c".repeat(64) }));
-    const second = db.prepare("SELECT secret_hash, created_at, rotated_at FROM credentials").get() as {
+    const second = db
+      .prepare("SELECT secret_hash, created_at, rotated_at FROM credentials")
+      .get() as {
       secret_hash: string;
       created_at: string;
       rotated_at: string | null;

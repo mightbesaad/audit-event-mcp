@@ -144,9 +144,7 @@ describe("verifyAccessToken — negative cases", () => {
     expect(await verifyAccessToken(SECRET, await signed({ ...base, iss: "evil" }))).toBeNull();
     expect(await verifyAccessToken(SECRET, await signed({ ...base, sub: "../up" }))).toBeNull();
     expect(await verifyAccessToken(SECRET, await signed({ ...base, scope: "root" }))).toBeNull();
-    expect(
-      await verifyAccessToken(SECRET, await signed({ ...base, exp: undefined })),
-    ).toBeNull();
+    expect(await verifyAccessToken(SECRET, await signed({ ...base, exp: undefined }))).toBeNull();
     expect(await verifyAccessToken(SECRET, await signed({ ...base, exp: "soon" }))).toBeNull();
     expect(await verifyAccessToken(SECRET, await signed(base))).toEqual({
       clientId: "c",
