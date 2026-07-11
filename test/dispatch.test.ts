@@ -310,7 +310,11 @@ describe("REST approval surface", () => {
 
   it("POST /approvals + GET /approvals/:id mirror the MCP tools", async () => {
     const created = await worker.fetch(
-      restRequest("/approvals", { method: "POST", body: JSON.stringify(APPROVAL_INPUT) }, agentToken),
+      restRequest(
+        "/approvals",
+        { method: "POST", body: JSON.stringify(APPROVAL_INPUT) },
+        agentToken,
+      ),
       env,
       {} as never,
     );

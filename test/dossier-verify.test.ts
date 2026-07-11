@@ -346,7 +346,9 @@ describe("the /verify.js core — against real chains and real signatures", () =
     // strictly less → the green "all attested" tick stays yellow, not a contradictory green ✓
     expect(report.notary.attestedRecords).toBeLessThan(report.parse.count);
     // row-accurate, not id-membership: one unproven row even though its id collides
-    expect(report.notary.unattestedIds.length).toBe(report.parse.count - report.notary.attestedRecords);
+    expect(report.notary.unattestedIds.length).toBe(
+      report.parse.count - report.notary.attestedRecords,
+    );
     expect(report.notary.unattestedIds).toContain(stolenId);
     expect(report.verdict).toBe("partially_attested");
     db.close();
