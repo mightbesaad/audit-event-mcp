@@ -33,10 +33,10 @@
       // fetch the key without CORS. Read-only; the notary worker is unchanged.
     }
   ],
-  // CHANNELS_KV — DEPLOY DAY: bind the SAME namespace created for the gated worker
-  // (see wrangler.jsonc). The /tg/webhook handler resolves chat → tenant bindings and
-  // redeems one-time connect codes here. Unset → /tg/webhook fails closed (503).
-  // "kv_namespaces": [{ "binding": "CHANNELS_KV", "id": "<same id as wrangler.jsonc>" }],
+  // CHANNELS_KV — SAME namespace as the gated worker (wrangler.jsonc). The /tg/webhook
+  // handler resolves chat → tenant bindings and redeems one-time connect codes here.
+  // Unset → /tg/webhook fails closed (503).
+  "kv_namespaces": [{ "binding": "CHANNELS_KV", "id": "95e8cff0d77e4455b2a494920e767292" }],
   // Secrets (wrangler secret put --config wrangler.go.jsonc):
   //   APPROVAL_TOKEN_SECRET — HMAC key for approval link tokens. The worker fails closed
   //   (503) when unset. High-entropy random string; rotation invalidates outstanding links.
