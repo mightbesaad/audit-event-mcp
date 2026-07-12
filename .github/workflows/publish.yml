@@ -1,6 +1,9 @@
 # publish.yml — GitHub Actions workflow for @kajaril/audit-event-mcp
 # Triggers on a v*.*.* tag push. Builds, tests, runs Biome, and publishes to
-# npm with provenance attestation via OIDC. No long-lived npm token required.
+# npm via trusted publishing (OIDC) — registered on npmjs.com against this
+# exact repo + workflow filename. No npm token anywhere: npm exchanges the
+# id-token below for a short-lived, single-publish credential; provenance
+# attestation is generated automatically as part of that exchange.
 
 name: Publish
 
@@ -31,6 +34,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
+      - name: Ensure npm supports trusted publishing (requires >=11.5.1)
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         run: npm ci
 
@@ -53,10 +59,8 @@ jobs:
           fi
           echo "Tag and package version match: $PKG_VERSION"
 
-      - name: Publish to npm with provenance
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (trusted publishing, OIDC)
+        run: npm publish --access public
 
       - name: Verify provenance attestation
         run: |
