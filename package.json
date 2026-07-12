@@ -1,6 +1,6 @@
 {
   "name": "@kajaril/audit-event-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent steward infrastructure — hash-chained audit log, Merkle notary, and GDPR/AI-Act compliance skill.",
   "license": "MIT",
   "author": "kajaril <studio@kajaril.com>",

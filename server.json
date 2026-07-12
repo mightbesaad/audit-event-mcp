@@ -3,7 +3,7 @@
   "name": "io.github.kajaril/audit-event-mcp",
   "title": "Audit Event",
   "description": "Agent steward infrastructure — hash-chained audit log with Merkle notary and GDPR/AI-Act compliance skill.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "websiteUrl": "https://kajaril.com/audit-event/",
   "repository": {
     "url": "https://github.com/mightbesaad/audit-event-mcp",

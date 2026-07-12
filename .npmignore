@@ -6,11 +6,11 @@ src/__tests__/
 test/
 docker/
 migrations/
-skills/
 biome.json
 tsconfig.json
 vitest.config.ts
 wrangler.jsonc
+wrangler.go.jsonc
 wrangler.notary.jsonc
 CLAUDE.md
 .wrangler/
