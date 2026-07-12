@@ -24,7 +24,7 @@ Order matters: 2 has a service binding to 1 (`NOTARY`); 3 has service bindings t
 cd audit-event-mcp
 git checkout main && git pull
 git status            # MUST print "nothing to commit, working tree clean" (repo rule)
-npx wrangler whoami   # account must be 363dfad0…
+npx wrangler whoami   # confirm this is the kajaril account, not a personal/test one
 npm test              # suite green (327)
 ```
 
